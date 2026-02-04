@@ -3985,6 +3985,10 @@ class GCodeSenderGUI:
             messagebox.showerror("Error", "Not connected to printer.")
             return
 
+        if not self.processed_gcode:
+            messagebox.showerror("Setup Error", "Error: Must load test profile before the test")
+            return
+
         # Hide the main view
         self.main_view_frame.pack_forget()
 
@@ -4066,10 +4070,7 @@ class GCodeSenderGUI:
         try:
             self.is_manual_command_running = True
             
-            # --- 1. Validation & Range Calculation ---
-            if not self.processed_gcode:
-                raise Exception("Error: Must load test profile prior to collision test.")
-
+            # --- 1. Range Calculation ---
             min_e = 0.0
             max_e = 0.0
             found_e = False
