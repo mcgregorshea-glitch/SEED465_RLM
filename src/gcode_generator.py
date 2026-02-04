@@ -34,11 +34,12 @@ class PatternGeneratorGUI:
     def __init__(self, root):
         """Initialize the GUI window and all widgets"""
         self.root = root
+        
         self.root.title("◢ PATTERN GENERATOR")
         self.root.geometry("850x700")
         self.root.minsize(750, 600)
         
-        # --- SCI-FI: Color Palette (from G-Code Sender) ---
+        # --- Color Palette (from G-Code Sender) ---
         self.COLOR_BG = "#0a0e14"
         self.COLOR_PANEL_BG = "#161b22"
         self.COLOR_BORDER = "#30363d"
@@ -51,7 +52,7 @@ class PatternGeneratorGUI:
         self.COLOR_ACCENT_RED = "#ff4444"
         self.COLOR_BLACK = "#000000"
 
-        # --- SCI-FI: Fonts (from G-Code Sender) ---
+        # --- Fonts (from G-Code Sender) ---
         self.FONT_HEADER = ("Orbitron", 13)
         self.FONT_BODY = ("Inter", 10) # Changed from 11
         self.FONT_BODY_SMALL = ("Inter", 9)
@@ -686,7 +687,7 @@ class PatternGeneratorGUI:
     def draw_preview_diagram(self, params, bounds_warnings, warning_level=0):
         """
         (MODIFIED) Draws a transparent wireframe sketch with
-        sci-fi colors, origin marker, and printer boundary warnings.
+        custom colors, origin marker, and printer boundary warnings.
         """
         self.preview_canvas.delete("all")
 
@@ -1129,7 +1130,7 @@ class PatternGeneratorGUI:
     def update_statistics(self, params, total_points, bounds_warnings, warning_level=0):        
         """
         (MODIFIED) Update statistics text display using
-        the new sci-fi text widget and tags.
+        the new custom text widget and tags.
         """
         self.stats_text.config(state=tk.NORMAL)
         self.stats_text.delete(1.0, tk.END)
