@@ -409,6 +409,7 @@ class GCodeSenderGUI:
         self.jog_feedrate_var = tk.StringVar(value="1000")
         self.rotation_step_var = tk.StringVar(value="5")
         self.rotation_feedrate_var = tk.StringVar(value="3000")
+        self.mm_per_degree_var = tk.DoubleVar(value=1.0) # Calibration: MM extrusion per Degree of tilt
         
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label_var = tk.StringVar(value="Progress: Idle")
@@ -664,6 +665,10 @@ class GCodeSenderGUI:
 
         self.collision_test_button = ttk.Button(frame, text="Collision\nAvoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED) # Initially disabled until connected
         self.collision_test_button.grid(row=1, column=6, rowspan=1, sticky="nsew", pady=(2,0), padx=(5,0))
+        
+        # Row 2: Calibration
+        ttk.Label(frame, text="E-Cal (mm/°):").grid(row=2, column=0, sticky="w", pady=(5,0));
+        ttk.Entry(frame, textvariable=self.mm_per_degree_var, width=8).grid(row=2, column=1, sticky="ew", pady=(5,0), padx=(0, 5))
         
         # Bind changes in the center entries to update the coordinate displays.
         self.center_x_entry.bind('<FocusOut>', self._on_center_change); self.center_x_entry.bind('<Return>', self._on_center_change)
@@ -1586,6 +1591,28 @@ class GCodeSenderGUI:
         if self.serial_connection and self.processed_gcode:
             self.start_button.config(state=tk.NORMAL)
 
+    def _apply_e_conversion(self, command):
+        """
+        Scales 'E' values in the G-code command by the configured mm/degree ratio.
+        Used to translate logical degrees (UI/File) to physical mm (Printer).
+        """
+        try:
+            ratio = float(self.mm_per_degree_var.get())
+            if abs(ratio - 1.0) < 0.000001: return command
+            
+            # Regex to find E<number>
+            # Matches E followed by optional whitespace, optional sign, digits, optional decimal
+            def replace_e(match):
+                val = float(match.group(1))
+                new_val = val * ratio
+                return f"E{new_val:.4f}"
+            
+            import re
+            # Only match E if it's a command parameter (not a comment, though stripped lines help)
+            return re.sub(r"([Ee])\s*([-+]?\d*\.?\d+)", replace_e, command)
+        except Exception:
+            return command
+
     def load_gcode_file(self, filepath):
         """
         Stores the path to a G-code file and triggers processing.
@@ -2299,8 +2326,15 @@ class GCodeSenderGUI:
                         if 'Z' in line.upper(): current_target['z'] = self.PRINTER_BOUNDS['z_min']
                 
                 # --- Send the line and wait for 'ok' ---
-                self.serial_connection.write(line.encode('utf-8') + b'\n')
-                self.queue_message(f"Sent: {line}")
+                line_to_send = self._apply_e_conversion(line)
+                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
+                
+                # Log modification if it happened
+                if line != line_to_send:
+                     self.queue_message(f"Sent: {line_to_send} (Orig: {line})")
+                else:
+                     self.queue_message(f"Sent: {line}")
+                     
                 ok_received = False
                 response_buffer = ""
                 timeout = 90.0 if "G28" in line.upper() else 20.0 # Homing can take a long time
@@ -3171,7 +3205,8 @@ class GCodeSenderGUI:
 
             # --- Send Line and Wait for 'ok' ---
             try:
-                self.serial_connection.write(gcode_line.encode('utf-8') + b'\n')
+                line_to_send = self._apply_e_conversion(gcode_line)
+                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
                 ok_received = False
                 response_buffer = ""
                 timeout = self.serial_connection.timeout if self.serial_connection.timeout else 10.0
@@ -4087,17 +4122,20 @@ class GCodeSenderGUI:
             # Tilt Sweep
             # Move to Min E
             self.queue_message(f"Tilting to Min ({min_e:.1f}°)...")
-            self.serial_connection.write(f"G1 E{min_e:.2f} F{speed}\nM400\n".encode('utf-8'))
+            cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Tilt Min timeout")
 
             # Move to Max E
             self.queue_message(f"Tilting to Max ({max_e:.1f}°)...")
-            self.serial_connection.write(f"G1 E{max_e:.2f} F{speed}\nM400\n".encode('utf-8'))
+            cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
 
             # Return to 0
             self.queue_message("Returning to 0°...")
-            self.serial_connection.write(f"G1 E0 F{speed}\nM400\n".encode('utf-8'))
+            cmd = self._apply_e_conversion(f"G1 E0 F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Return 0 timeout")
 
             self.queue_message("Collision Test Complete.", "SUCCESS")
