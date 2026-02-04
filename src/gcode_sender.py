@@ -451,10 +451,15 @@ class GCodeSenderGUI:
         self.coord_mode = tk.StringVar(value="absolute")
 
         # --- Build the main GUI layout ---
-        self.create_header_bar(self.root)
+        # Container for the standard view (Header, Panels, Footer)
+        self.main_view_frame = ttk.Frame(root, style='TFrame')
+        self.main_view_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.create_header_bar(self.main_view_frame)
 
         # The main layout is a PanedWindow, which allows the user to resize the left and right panels.
-        main_container = ttk.Frame(root, padding=5, style='TFrame')
+        # Note: This is now packed into self.main_view_frame
+        main_container = ttk.Frame(self.main_view_frame, padding=5, style='TFrame')
         main_container.pack(fill=tk.BOTH, expand=True)
         
         self.paned_window = tk.PanedWindow(main_container, orient=tk.HORIZONTAL, sashrelief=tk.FLAT, sashwidth=6, bg=self.COLOR_BG, showhandle=False)
@@ -539,7 +544,7 @@ class GCodeSenderGUI:
         self.create_log_panel(cli_tab)
         self.create_3d_display_panel(display_tab)
         
-        self.create_footer_bar(self.root)
+        self.create_footer_bar(self.main_view_frame)
 
         # --- Final Layout Adjustments ---
         # This section ensures the left panel is sized correctly on startup.
@@ -655,7 +660,10 @@ class GCodeSenderGUI:
         self.center_z_entry.grid(row=1, column=5, sticky="ew", pady=(5,0), padx=(0, 10))
 
         self.mark_center_button = ttk.Button(frame, text="Mark Current\nas Center", command=self._mark_current_as_center, state=tk.DISABLED)
-        self.mark_center_button.grid(row=0, column=6, rowspan=2, sticky="nsew", pady=(0,0), padx=(5,0))
+        self.mark_center_button.grid(row=0, column=6, rowspan=1, sticky="nsew", pady=(0,2), padx=(5,0))
+
+        self.collision_test_button = ttk.Button(frame, text="Collision\nAvoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED) # Initially disabled until connected
+        self.collision_test_button.grid(row=1, column=6, rowspan=1, sticky="nsew", pady=(2,0), padx=(5,0))
         
         # Bind changes in the center entries to update the coordinate displays.
         self.center_x_entry.bind('<FocusOut>', self._on_center_change); self.center_x_entry.bind('<Return>', self._on_center_change)
@@ -1447,6 +1455,9 @@ class GCodeSenderGUI:
         # Also enable/disable the 'Mark Current as Center' button
         if hasattr(self, 'mark_center_button'):
              self.mark_center_button.config(state=state)
+        
+        if hasattr(self, 'collision_test_button'):
+             self.collision_test_button.config(state=state)
 
 
     def _set_goto_controls_state(self, state):
@@ -3929,6 +3940,145 @@ class GCodeSenderGUI:
                 writer.writerow(row)
         except Exception as log_err:
             self.queue_message(f"Log Write Error: {log_err}", "ERROR")
+
+
+    # --- Collision Avoidance Test Screen ---
+
+    def _open_collision_test_screen(self):
+        """Swaps the main UI for the Collision Avoidance Test screen."""
+        if not self.serial_connection:
+            messagebox.showerror("Error", "Not connected to printer.")
+            return
+
+        # Hide the main view
+        self.main_view_frame.pack_forget()
+
+        # Create the test view frame
+        self.test_view_frame = tk.Frame(self.root, bg=self.COLOR_BG)
+        self.test_view_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Content ---
+        # 1. Warning Label
+        warning_frame = tk.Frame(self.test_view_frame, bg=self.COLOR_ACCENT_AMBER, padx=20, pady=20)
+        warning_frame.pack(fill=tk.X, padx=50, pady=(50, 20))
+        
+        lbl_warn = tk.Label(warning_frame, text="⚠ CAUTION ⚠", 
+                            font=("Inter", 24, "bold"), bg=self.COLOR_ACCENT_AMBER, fg=self.COLOR_BLACK)
+        lbl_warn.pack()
+        
+        lbl_msg = tk.Label(warning_frame, text="Remove hub and implant to avoid damage to equipment.", 
+                           font=("Inter", 16), bg=self.COLOR_ACCENT_AMBER, fg=self.COLOR_BLACK)
+        lbl_msg.pack(pady=(10, 0))
+
+        # 2. Controls Frame
+        ctrl_frame = tk.Frame(self.test_view_frame, bg=self.COLOR_BG)
+        ctrl_frame.pack(expand=True)
+
+        # Begin Test Button
+        self.btn_begin_test = tk.Button(ctrl_frame, text="BEGIN TEST", 
+                                        font=("Orbitron", 18, "bold"), 
+                                        bg=self.COLOR_ACCENT_CYAN, fg=self.COLOR_BLACK,
+                                        activebackground="#00eaff", activeforeground=self.COLOR_BLACK,
+                                        relief=tk.RAISED, bd=3, padx=30, pady=15,
+                                        command=self._start_collision_test)
+        self.btn_begin_test.pack(pady=20)
+
+        # STOP MOTION Button (Big Red)
+        self.btn_stop_test = tk.Button(ctrl_frame, text="STOP MOTION", 
+                                       font=("Orbitron", 24, "bold"), 
+                                       bg=self.COLOR_ACCENT_RED, fg="white",
+                                       activebackground="#ff6666", activeforeground="white",
+                                       relief=tk.RAISED, bd=5, padx=50, pady=30,
+                                       command=self.emergency_stop)
+        self.btn_stop_test.pack(pady=20)
+
+        # Status Label for Test
+        self.lbl_test_status = tk.Label(ctrl_frame, text="Ready", font=("Inter", 14), bg=self.COLOR_BG, fg=self.COLOR_TEXT_SECONDARY)
+        self.lbl_test_status.pack(pady=10)
+
+        # Exit Button (Small)
+        self.btn_exit_test = tk.Button(self.test_view_frame, text="Exit Test", 
+                                       font=("Inter", 12), 
+                                       bg=self.COLOR_PANEL_BG, fg=self.COLOR_TEXT_PRIMARY,
+                                       relief=tk.FLAT, padx=20, pady=10,
+                                       command=self._close_collision_test_screen)
+        self.btn_exit_test.pack(side=tk.BOTTOM, pady=30)
+
+    def _close_collision_test_screen(self):
+        """Restores the main UI."""
+        if hasattr(self, 'test_view_frame') and self.test_view_frame:
+            self.test_view_frame.destroy()
+        
+        self.main_view_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _start_collision_test(self):
+        """Starts the collision test sequence in a background thread."""
+        if self.is_sending or self.is_manual_command_running:
+            return
+        
+        self.btn_begin_test.config(state=tk.DISABLED)
+        self.btn_exit_test.config(state=tk.DISABLED)
+        self.lbl_test_status.config(text="Moving to Center...", fg=self.COLOR_ACCENT_CYAN)
+        
+        threading.Thread(target=self._collision_test_worker, daemon=True).start()
+
+    def _collision_test_worker(self):
+        """
+        Background worker for the collision test.
+        1. Move to Center (X, Y).
+        2. Sweep Tilt (E) -90 to +90.
+        """
+        try:
+            self.is_manual_command_running = True
+            
+            # Get Center
+            try:
+                cx = float(self.center_x_var.get())
+                cy = float(self.center_y_var.get())
+            except ValueError:
+                self.queue_message("Invalid Center Coordinates!", "ERROR")
+                return
+
+            speed = 1000 # mm/min or deg/min
+            
+            # 1. Move to Center
+            self.queue_message(f"Moving to Center ({cx}, {cy})...")
+            cmd = f"G90\nG1 X{cx} Y{cy} F{speed}\nM400\n"
+            self.serial_connection.write(cmd.encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Move to Center timeout")
+
+            # 2. Tilt Sweep
+            # Assume 0 is neutral.
+            # Move to -90
+            self.queue_message("Tilting to -90°...")
+            self.serial_connection.write(f"G1 E-90 F{speed}\nM400\n".encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Tilt -90 timeout")
+
+            # Move to +90
+            self.queue_message("Tilting to +90°...")
+            self.serial_connection.write(f"G1 E90 F{speed}\nM400\n".encode('utf-8'))
+            if not self._wait_for_ok(timeout=60): raise Exception("Tilt +90 timeout")
+
+            # Return to 0
+            self.queue_message("Returning to 0°...")
+            self.serial_connection.write(f"G1 E0 F{speed}\nM400\n".encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Return 0 timeout")
+
+            self.queue_message("Collision Test Complete.", "SUCCESS")
+            
+        except Exception as e:
+            self.queue_message(f"Test Failed: {e}", "ERROR")
+        finally:
+            self.is_manual_command_running = False
+            # Update UI via queue or invoke
+            self.root.after(0, self._reset_test_ui)
+
+    def _reset_test_ui(self):
+        """Re-enables the test screen buttons."""
+        if hasattr(self, 'btn_begin_test'):
+            self.btn_begin_test.config(state=tk.NORMAL)
+            self.btn_exit_test.config(state=tk.NORMAL)
+            self.lbl_test_status.config(text="Test Complete", fg=self.COLOR_TEXT_PRIMARY)
 
 
 # --- Status Indicator Widget ---
