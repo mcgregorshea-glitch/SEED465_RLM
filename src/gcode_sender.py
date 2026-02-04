@@ -4026,11 +4026,48 @@ class GCodeSenderGUI:
         """
         Background worker for the collision test.
         1. Move to Center (X, Y).
-        2. Sweep Tilt (E) -90 to +90.
+        2. Sweep Tilt (E) through the full range found in the loaded G-code.
         """
         try:
             self.is_manual_command_running = True
             
+            # --- 1. Validation & Range Calculation ---
+            if not self.processed_gcode:
+                raise Exception("Error: Must load test profile prior to collision test.")
+
+            min_e = 0.0
+            max_e = 0.0
+            found_e = False
+
+            # Scan processed G-code for E limits
+            # processed_gcode contains strings like "G1 X10 Y10 E45 F1000"
+            for line in self.processed_gcode:
+                if 'E' in line.upper():
+                    import re as local_re
+                    match = local_re.search(r"E([-+]?\d*\.?\d+)", line)
+                    if match:
+                        val = float(match.group(1))
+                        if not found_e:
+                            min_e = val
+                            max_e = val
+                            found_e = True
+                        else:
+                            if val < min_e: min_e = val
+                            if val > max_e: max_e = val
+            
+            if not found_e:
+                # Fallback if no E moves found (e.g. flat print)
+                self.queue_message("No rotation (E) found in G-code. Using default +/- 10°.", "WARN")
+                min_e = -10.0
+                max_e = 10.0
+            
+            # Add a small safety buffer or use exact? 
+            # Request said "full range of rotation requested". Let's stick to exact per file.
+            self.queue_message(f"Test Range: E{min_e:.1f}° to E{max_e:.1f}°", "INFO")
+
+            
+            # --- 2. Execution ---
+
             # Get Center
             try:
                 cx = float(self.center_x_var.get())
@@ -4041,23 +4078,22 @@ class GCodeSenderGUI:
 
             speed = 1000 # mm/min or deg/min
             
-            # 1. Move to Center
+            # Move to Center
             self.queue_message(f"Moving to Center ({cx}, {cy})...")
             cmd = f"G90\nG1 X{cx} Y{cy} F{speed}\nM400\n"
             self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Move to Center timeout")
 
-            # 2. Tilt Sweep
-            # Assume 0 is neutral.
-            # Move to -90
-            self.queue_message("Tilting to -90°...")
-            self.serial_connection.write(f"G1 E-90 F{speed}\nM400\n".encode('utf-8'))
-            if not self._wait_for_ok(timeout=30): raise Exception("Tilt -90 timeout")
+            # Tilt Sweep
+            # Move to Min E
+            self.queue_message(f"Tilting to Min ({min_e:.1f}°)...")
+            self.serial_connection.write(f"G1 E{min_e:.2f} F{speed}\nM400\n".encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Tilt Min timeout")
 
-            # Move to +90
-            self.queue_message("Tilting to +90°...")
-            self.serial_connection.write(f"G1 E90 F{speed}\nM400\n".encode('utf-8'))
-            if not self._wait_for_ok(timeout=60): raise Exception("Tilt +90 timeout")
+            # Move to Max E
+            self.queue_message(f"Tilting to Max ({max_e:.1f}°)...")
+            self.serial_connection.write(f"G1 E{max_e:.2f} F{speed}\nM400\n".encode('utf-8'))
+            if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
 
             # Return to 0
             self.queue_message("Returning to 0°...")
@@ -4068,6 +4104,9 @@ class GCodeSenderGUI:
             
         except Exception as e:
             self.queue_message(f"Test Failed: {e}", "ERROR")
+            if "Error: Must load" in str(e):
+                messagebox.showerror("Setup Error", str(e))
+
         finally:
             self.is_manual_command_running = False
             # Update UI via queue or invoke
