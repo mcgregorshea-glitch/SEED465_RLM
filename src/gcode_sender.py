@@ -2270,6 +2270,109 @@ class GCodeSenderGUI:
         return coords
 
 
+    def _parse_m119_response(self, response_text):
+        """
+        Parses the output of M119 (Endstop States).
+        Returns a dict: {'x_min': 'open'/'triggered', ...}
+        """
+        states = {}
+        lines = response_text.splitlines()
+        for line in lines:
+            if ':' in line:
+                key, val = line.split(':', 1)
+                states[key.strip().lower()] = val.strip().lower()
+        return states
+
+    def _homing_verification_routine(self):
+        """
+        Executes a multi-phase verification to detect X/Y drift before re-homing.
+        Must be called from a background thread (sender or manual).
+        Raises InterruptedError if verification fails or stop is requested.
+        """
+        self.queue_message("Starting Homing Verification...", "INFO")
+        
+        def send_and_wait_m119():
+            self.serial_connection.write(b'M119\n')
+            buffer = ""
+            start = time.time()
+            while time.time() - start < 5.0:
+                if self.stop_event.is_set(): raise InterruptedError("Stop")
+                if self.serial_connection.in_waiting > 0:
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                    if 'ok' in buffer.lower():
+                        return self._parse_m119_response(buffer)
+                time.sleep(0.05)
+            raise TimeoutError("M119 timeout")
+
+        def send_move_and_wait(cmd):
+            self.serial_connection.write(cmd.encode('utf-8') + b'\n')
+            buffer = ""
+            start = time.time()
+            # Homing can take longer, but G1 moves should be within 30s
+            timeout = 90.0 if "G28" in cmd.upper() else 30.0
+            while time.time() - start < timeout:
+                if self.stop_event.is_set(): raise InterruptedError("Stop")
+                if self.serial_connection.in_waiting > 0:
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                    if 'ok' in buffer.lower():
+                        return
+                time.sleep(0.05)
+            raise TimeoutError(f"Command timeout: {cmd}")
+
+        try:
+            # 0. Wait for all previous moves to finish
+            send_move_and_wait("M400")
+            
+            # 1. Phase A: Move to Safe Zone (0.5, 0.5)
+            # This detects "Negative Drift" (printer thinks it's further from switch than it is)
+            self.queue_message("Verification Phase A: Moving to Safe Zone (0.5, 0.5)...")
+            send_move_and_wait("G1 X0.5 Y0.5 F3000")
+            send_move_and_wait("M400")
+            states = send_and_wait_m119()
+            
+            if states.get('x_min') == 'triggered' or states.get('y_min') == 'triggered':
+                axis = 'X' if states.get('x_min') == 'triggered' else 'Y'
+                diag = f"CRITICAL ERROR: {axis}-axis triggered early at Safe Zone (0.5mm). Negative drift/skipped steps detected."
+                self._handle_homing_failure(diag)
+                return
+
+            # 2. Phase B: Move to Home Target (0, 0)
+            # This detects "Positive Drift" (printer thinks it's at switch but it's not)
+            self.queue_message("Verification Phase B: Moving to Home Target (0, 0)...")
+            send_move_and_wait("G1 X0 Y0 F500") 
+            send_move_and_wait("M400")
+            states = send_and_wait_m119()
+            
+            if states.get('x_min') == 'open' or states.get('y_min') == 'open':
+                axis = 'X' if states.get('x_min') == 'open' else 'Y'
+                diag = f"CRITICAL ERROR: {axis}-axis failed to trigger at Home Target (0.0mm). Positive drift/skipped steps detected."
+                self._handle_homing_failure(diag)
+                return
+
+            # 3. Phase C: Actual Re-Home to sync coordinate system
+            self.queue_message("Verification Passed. Performing Sync Home (G28 X Y)...", "SUCCESS")
+            send_move_and_wait("G28 X Y")
+            self.queue_message("Sync Home Complete. Resuming scan.")
+
+        except Exception as e:
+            if isinstance(e, InterruptedError): raise
+            diag = f"Verification Aborted: {str(e)}"
+            self._handle_homing_failure(diag)
+
+    def _handle_homing_failure(self, diagnosis):
+        """Helper to halt motion and notify GUI on verification failure."""
+        self.queue_message(diagnosis, "CRITICAL")
+        if self.serial_connection:
+            try: 
+                self.serial_connection.write(b'M410\n') # Quick Stop
+                self.serial_connection.flush()
+            except: pass
+        
+        self.stop_event.set()
+        self.message_queue.put(("HOMING_FAILURE", diagnosis))
+        raise InterruptedError(diagnosis)
+
+
     def _send_manual_command_thread(self, command):
         """
         The background worker thread for sending a manual G-code command.
@@ -3182,6 +3285,18 @@ class GCodeSenderGUI:
                 if parsed:
                     target_pos_for_line = last_pos.copy() 
                     target_pos_for_line.update(parsed) # The processed G-code is already absolute.
+
+                    # --- Homing Verification Logic ---
+                    # Detect if this move command changes the Z layer.
+                    # If it does, we rehome before executing this command.
+                    if target_pos_for_line['z'] != last_pos['z'] and last_pos['z'] is not None:
+                        self.queue_message(f"Layer change detected ({last_pos['z']:.2f} -> {target_pos_for_line['z']:.2f}). Running homing verification...")
+                        try:
+                            self._homing_verification_routine()
+                        except InterruptedError:
+                            # Re-raise to be caught by the outer loop's error handler
+                            raise
+
             elif "G28" in gcode_line.upper():
                 target_pos_for_line = {
                     'x': self.PRINTER_BOUNDS['x_min'], 
@@ -3288,8 +3403,9 @@ class GCodeSenderGUI:
                 else:
                     self.queue_message(f"Warning: No 'ok' received for '{gcode_line}' (timeout: {timeout:.1f}s).", "WARN")
 
-            except InterruptedError:
-                self.queue_message("G-code stream interrupted by user.", "WARN")
+            except InterruptedError as e:
+                msg = str(e) if str(e) else "G-code stream interrupted by user."
+                self.queue_message(msg, "WARN" if not str(e) else "ERROR")
                 success = False
                 break
             except serial.SerialException as e:
@@ -3452,6 +3568,15 @@ class GCodeSenderGUI:
                     reason = msg_content
                     self.log_message(f"!!! STOP: {reason} !!!", "CRITICAL")
                     self.emergency_stop()
+
+                elif msg_type == "HOMING_FAILURE":
+                    diagnosis = msg_content
+                    self.log_message(f"Homing Verification Failed: {diagnosis}", "CRITICAL")
+                    messagebox.showwarning("Homing Verification Failure", 
+                                          f"The printer has drifted from its expected position.\n\n"
+                                          f"DIAGNOSIS:\n{diagnosis}\n\n"
+                                          f"The print has been halted for safety. Please check for mechanical obstructions, "
+                                          f"loose belts, or missed steps. Re-home and restart the program when ready.")
 
                 elif msg_type == "DMM_CONNECTED":
                     self.is_dmm_connected = True
