@@ -345,6 +345,7 @@ class GCodeSenderGUI:
         self.is_paused = False
         self.is_manual_command_running = False
         self.is_calibrating = False
+        self.rotation_crash_test_complete = False
         
         # Threading events for controlling background tasks (sending G-code, connecting)
         self.stop_event = threading.Event()
@@ -1652,6 +1653,7 @@ class GCodeSenderGUI:
         self.ordered_z_values = []
         self.completed_move_count = 0
         self._plot_cache_valid = False # Invalidate the plot cache
+        self.rotation_crash_test_complete = False
 
         if not hasattr(self, 'gcode_filepath') or not self.gcode_filepath:
             self.start_button.config(state=tk.DISABLED)
@@ -1799,6 +1801,12 @@ class GCodeSenderGUI:
 
         self.processed_gcode = temp_processed
         self.log_message(f"G-code processed. {lines_translated} moves translated. Toolpath data generated for {len(self.toolpath_by_layer)} layers.", "SUCCESS")
+        
+        # Check for rotation components to determine if collision test is mandatory
+        has_rotation = any('E' in line.upper() for line in self.processed_gcode if not line.strip().startswith(';'))
+        if not has_rotation:
+            self.rotation_crash_test_complete = True
+            self.log_message("No rotation detected in G-code. Collision test marked as complete.")
         
         if self.serial_connection:
             self.start_button.config(state=tk.NORMAL)
@@ -2037,6 +2045,14 @@ class GCodeSenderGUI:
         if not self.processed_gcode:
             messagebox.showerror("Error", "No valid G-code to send. Check file, center coordinates, and printer bounds.")
             return
+
+        # --- Crash Avoidance Check ---
+        if not self.rotation_crash_test_complete:
+            ans = messagebox.askyesno("Safety Check", 
+                                      "The Rotation Collision Avoidance Test has not been completed for this profile.\n\n"
+                                      "Are you sure you want to proceed with the scan?")
+            if not ans:
+                return
             
         if self.is_sending or self.is_manual_command_running:
             messagebox.showwarning("Warning", "Printer is already busy with another operation.")
@@ -2133,6 +2149,9 @@ class GCodeSenderGUI:
         
         self.log_message("!!! EMERGENCY STOP triggered !!!", "CRITICAL")
         
+        # Invalidate collision test status if we had to stop motion
+        self.rotation_crash_test_complete = False
+        
         # Un-pause and then stop all running threads.
         self.pause_event.set()
         self.stop_event.set()
@@ -2178,6 +2197,9 @@ class GCodeSenderGUI:
         
         self.log_message("Quick Stop requested.", "WARN")
         
+        # Invalidate collision test status if we had to stop motion
+        self.rotation_crash_test_complete = False
+
         # Un-pause and then stop all running threads.
         self.pause_event.set()
         self.stop_event.set()
@@ -4264,6 +4286,7 @@ class GCodeSenderGUI:
             self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Return 0 timeout")
 
+            self.rotation_crash_test_complete = True
             self.queue_message("Collision Test Complete.", "SUCCESS")
             
         except Exception as e:
