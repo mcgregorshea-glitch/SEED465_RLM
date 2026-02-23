@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import serial
+import serial # type: ignore
 import time
 import re
 import threading
@@ -9,10 +9,11 @@ import serial.tools.list_ports # For port scanning
 import csv
 from datetime import datetime
 import os
+from typing import Any, Optional, Dict, List, Tuple
 
 # Optional PyVISA import for DMM control
 try:
-    from pyvisa import ResourceManager
+    from pyvisa import ResourceManager # type: ignore
     HAS_PYVISA = True
 except ImportError:
     ResourceManager = None
@@ -20,7 +21,7 @@ except ImportError:
 
 # Optional RPi.GPIO import for limit switches
 try:
-    import RPi.GPIO as GPIO
+    import RPi.GPIO as GPIO # type: ignore
     HAS_GPIO = True
 except ImportError:
     GPIO = None
@@ -28,7 +29,7 @@ except ImportError:
 
 # Optional numpy import for memory optimization
 try:
-    import numpy as np
+    import numpy as np # type: ignore
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
@@ -55,9 +56,9 @@ class DmmInst:
         self.samples = samples
         self.name = name
         self.scale = scale
-        self.pv = None
+        self.pv: Any = None
 
-    def connect(self, pvrmgr) -> None:
+    def connect(self, pvrmgr: Any) -> None:
         if not pvrmgr: return
         # Using the IP schema from dmm-example.py
         id_str = f'TCPIP0::10.123.210.{self.id}::inst0::INSTR' 
@@ -84,7 +85,7 @@ class DmmInst:
 
     def read(self) -> float:
         if self.pv:
-            return self.pv.query_ascii_values('CALC:AVER:ALL?')[0] * self.scale
+            return float(self.pv.query_ascii_values('CALC:AVER:ALL?')[0]) * self.scale
         return 0.0
 
 
@@ -92,8 +93,8 @@ class DmmGroup:
     def __init__(self, config: list) -> None:
         self.dmms: list[DmmInst] = []
         for info in config:
-            self.dmms.append(DmmInst(*info))
-        self.pvrmgr = None
+            self.dmms.append(DmmInst(*info)) # type: ignore
+        self.pvrmgr: Any = None
 
     def initialize(self) -> None:
         if not HAS_PYVISA or not ResourceManager:
@@ -361,11 +362,11 @@ class GCodeSenderGUI:
         self.history_index = 0
         
         # Data structures for visualizing the G-code toolpath
-        self.toolpath_by_layer = {}   # {z_level: [((x1,y1),(x2,y2)), ...], ...}
-        self.move_to_layer_map = []   # [(z_level, index_on_layer), ...]
-        self.ordered_z_values = []    # [z1, z2, z3, ...]
-        self.completed_move_count = 0 # How many moves have been completed so far
-        self.after_id = None          # To store the ID of the recurring 'after' job
+        self.toolpath_by_layer: Dict[float, List[Any]] = {}   # {z_level: [((x1,y1),(x2,y2)), ...], ...}
+        self.move_to_layer_map: List[Any] = []   # [(z_level, index_on_layer), ...]
+        self.ordered_z_values: List[float] = []    # [z1, z2, z3, ...]
+        self.completed_move_count: int = 0 # How many moves have been completed so far
+        self.after_id: Any = None          # To store the ID of the recurring 'after' job
 
         # Cache for the 3D plot coordinates to avoid recalculating them on every redraw
         self._plot_coords_cache = None
@@ -378,8 +379,8 @@ class GCodeSenderGUI:
         self.is_2d_plot_enabled = tk.BooleanVar(value=True)
 
         # --- Printer Physical Bounds (in mm) ---
-        # E is 'Rotation' (repurposed extruder), units depend on steps/mm config, assuming linear mm for now as requested.
-        self.PRINTER_BOUNDS = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 250, 'e_min': -10000, 'e_max': 10000 }
+        # E is 'Rotation' (repurposed extruder), units are now DEGREES. Firmware must be configured accordingly (e.g., M92 E8.888).
+        self.PRINTER_BOUNDS: Dict[str, float] = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 250, 'e_min': -10000, 'e_max': 10000 }
 
         # --- Tkinter StringVars (for dynamically updating GUI labels) ---
         self.file_path_var = tk.StringVar(value="No file selected")
@@ -410,7 +411,7 @@ class GCodeSenderGUI:
         self.jog_feedrate_var = tk.StringVar(value="1000")
         self.rotation_step_var = tk.StringVar(value="5")
         self.rotation_feedrate_var = tk.StringVar(value="3000")
-        self.mm_per_degree_var = tk.DoubleVar(value=1.0) # Calibration: MM extrusion per Degree of tilt
+        self.mm_per_degree_var = tk.DoubleVar(value=8.888) # Calibration: MM extrusion per Degree of tilt
         
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label_var = tk.StringVar(value="Progress: Idle")
@@ -444,9 +445,9 @@ class GCodeSenderGUI:
         self.target_abs_e = 0.0
         
         # The 'last commanded' position (red marker on canvas), where the printer SHOULD be.
-        self.last_cmd_abs_x = None # Use None to indicate the position is not yet known.
-        self.last_cmd_abs_y = None
-        self.last_cmd_abs_z = None
+        self.last_cmd_abs_x: Optional[float] = None # Use None to indicate the position is not yet known.
+        self.last_cmd_abs_y: Optional[float] = None
+        self.last_cmd_abs_z: Optional[float] = None
         self.last_cmd_abs_e = None
         
         # The current coordinate display mode ('absolute' or 'relative' to the center point).
@@ -1730,9 +1731,9 @@ class GCodeSenderGUI:
                         rel_y = parsed_coords.get('y')
                         rel_z = parsed_coords.get('z')
                         
-                        abs_x = rel_x + center_x if rel_x is not None else current_pos.get('x')
-                        abs_y = rel_y + center_y if rel_y is not None else current_pos.get('y')
-                        abs_z = rel_z + center_z if rel_z is not None else current_pos.get('z')
+                        abs_x = current_pos.get('x') if rel_x is None else float(rel_x) + center_x
+                        abs_y = current_pos.get('y') if rel_y is None else float(rel_y) + center_y
+                        abs_z = current_pos.get('z') if rel_z is None else float(rel_z) + center_z
 
                         # On the very first move, the start position might be unknown.
                         # We establish the position but cannot draw a path segment yet.
@@ -1951,7 +1952,7 @@ class GCodeSenderGUI:
                     m302_response_buffer = ""
                     while time.time() - m302_start_time < 5.0: # Short timeout for M302
                         if serial_conn.in_waiting > 0:
-                            m302_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore')
+                            m302_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore') # type: ignore
                             if 'ok' in m302_response_buffer.lower():
                                 m302_ok = True
                                 break
@@ -2266,9 +2267,9 @@ class GCodeSenderGUI:
 
 
     # --- Thread Workers ---
-    def _parse_gcode_coords(self, gcode_line):
+    def _parse_gcode_coords(self, gcode_line: str) -> Dict[str, float]:
         """Extracts X, Y, Z, and E coordinates from a G0/G1/G92 command line."""
-        coords = {}
+        coords: Dict[str, float] = {}
         # Regex to capture X, Y, Z, and E (case insensitive)
         # Group 1: X value, Group 2: Y value, Group 3: Z value, Group 4: E value
         match = re.search(r"^[Gg](?:[01]|92).*?(?:[Xx]([-+]?\d*\.?\d+))?.*?(?:[Yy]([-+]?\d*\.?\d+))?.*?(?:[Zz]([-+]?\d*\.?\d+))?.*?(?:[Ee]([-+]?\d*\.?\d+))?", gcode_line)
@@ -2320,7 +2321,7 @@ class GCodeSenderGUI:
             while time.time() - start < 5.0:
                 if self.stop_event.is_set(): raise InterruptedError("Stop")
                 if self.serial_connection.in_waiting > 0:
-                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore') # type: ignore
                     if 'ok' in buffer.lower():
                         return self._parse_m119_response(buffer)
                 time.sleep(0.05)
@@ -2335,7 +2336,7 @@ class GCodeSenderGUI:
             while time.time() - start < timeout:
                 if self.stop_event.is_set(): raise InterruptedError("Stop")
                 if self.serial_connection.in_waiting > 0:
-                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore') # type: ignore
                     if 'ok' in buffer.lower():
                         return
                 time.sleep(0.05)
@@ -3783,6 +3784,11 @@ class GCodeSenderGUI:
         else:
             # If no file is loaded, we still need to update displays (e.g., crosshair, DROs).
             self._update_all_displays()
+
+    def _open_collision_test_screen(self):
+        """Opens a new window to guide the user through a collision avoidance test."""
+        # For now, a simple placeholder. Full implementation will involve a new Tkinter Toplevel window.
+        messagebox.showinfo("Collision Avoidance Test", "This feature is not yet implemented. It will guide you through testing the rotation limits.")
 
     def _set_coord_mode(self, mode):
         """

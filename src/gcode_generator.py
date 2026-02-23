@@ -30,6 +30,39 @@ class PatternGeneratorGUI:
     - Updated menu item label to be more descriptive.
     - Fixed scrollbar styling.
     """
+    
+    # --- Pylance Type Definitions ---
+    # To prevent 'Object has no attribute' warnings for widgets created in helper methods:
+    generate_button: ttk.Button
+    scrollable_window_id: int
+    profile_name: ttk.Entry
+    filename_preview: ttk.Label
+
+    x_min_label: ttk.Label; x_min: ttk.Entry
+    x_max_label: ttk.Label; x_max: ttk.Entry
+    x_offset_label: ttk.Label; x_offset: ttk.Entry
+    x_step: ttk.Entry
+
+    y_min_label: ttk.Label; y_min: ttk.Entry
+    y_max_label: ttk.Label; y_max: ttk.Entry
+    y_offset_label: ttk.Label; y_offset: ttk.Entry
+    y_step: ttk.Entry
+
+    z_min_label: ttk.Label; z_min: ttk.Entry
+    z_max_label: ttk.Label; z_max: ttk.Entry
+    z_offset_label: ttk.Label; z_offset: ttk.Entry
+    z_step: ttk.Entry
+
+    rot_min_label: ttk.Label; rot_min: ttk.Entry
+    rot_max_label: ttk.Label; rot_max: ttk.Entry
+    rot_offset_label: ttk.Label; rot_offset: ttk.Entry
+    rot_step: ttk.Entry
+
+    travelspeed: ttk.Entry
+    pause_time: ttk.Entry
+
+    stats_text: tk.Text
+    preview_canvas: tk.Canvas
 
     def __init__(self, root):
         """Initialize the GUI window and all widgets"""
@@ -696,7 +729,7 @@ class PatternGeneratorGUI:
 
         if canvas_w <= 1 or canvas_h <= 1:
             # --- MODIFIED: Pass warning_level to recursive call ---
-            self.preview_canvas.after(50, lambda: self.draw_preview_diagram(params, bounds_warnings, warning_level))
+            self.preview_canvas.after(50, self.draw_preview_diagram, params, bounds_warnings, warning_level)
             return
 
         if params is None:
@@ -778,13 +811,6 @@ class PatternGeneratorGUI:
             
             return (final_x, final_y)
 
-        # --- Define styles ---
-        visible_style = {'fill': self.COLOR_ACCENT_CYAN, 'width': 2}
-        # *** FIX: Use a dashed cyan for hidden lines ***
-        hidden_style = {'fill': self.COLOR_ACCENT_CYAN, 'dash': (2, 4), 'width': 1}
-        # *** BUG FIX: Changed 'outline' to 'fill' ***
-        warning_style = {'fill': self.COLOR_ACCENT_RED, 'dash': (4, 4), 'width': 2}
-
         # --- NEW: Draw Printer Bounds ---
         # --- MODIFIED: Removed 'if bounds_warnings:' ---
         pl = PRINTER_LIMITS # short alias
@@ -798,21 +824,25 @@ class PatternGeneratorGUI:
         pb7 = project( pl['x'],  pl['y'], pl['z_max']) # Back-top-right
         pb8 = project(-pl['x'],  pl['y'], pl['z_max']) # Back-top-left
         
+        # Helper for warning style edges
+        def draw_warning_line(start, end):
+            self.preview_canvas.create_line(start, end, fill=self.COLOR_ACCENT_RED, dash=(4, 4), width=2)
+
         # Draw all 12 edges of printer box
-        self.preview_canvas.create_line(pb1, pb2, **warning_style) # front-bottom
-        self.preview_canvas.create_line(pb2, pb3, **warning_style) # front-right
-        self.preview_canvas.create_line(pb3, pb4, **warning_style) # front-top
-        self.preview_canvas.create_line(pb4, pb1, **warning_style) # front-left
+        draw_warning_line(pb1, pb2) # front-bottom
+        draw_warning_line(pb2, pb3) # front-right
+        draw_warning_line(pb3, pb4) # front-top
+        draw_warning_line(pb4, pb1) # front-left
         
-        self.preview_canvas.create_line(pb5, pb6, **warning_style) # back-bottom
-        self.preview_canvas.create_line(pb6, pb7, **warning_style) # back-right
-        self.preview_canvas.create_line(pb7, pb8, **warning_style) # back-top
-        self.preview_canvas.create_line(pb8, pb5, **warning_style) # back-left
+        draw_warning_line(pb5, pb6) # back-bottom
+        draw_warning_line(pb6, pb7) # back-right
+        draw_warning_line(pb7, pb8) # back-top
+        draw_warning_line(pb8, pb5) # back-left
         
-        self.preview_canvas.create_line(pb1, pb5, **warning_style) # connect-bottom-left
-        self.preview_canvas.create_line(pb2, pb6, **warning_style) # connect-bottom-right
-        self.preview_canvas.create_line(pb3, pb7, **warning_style) # connect-top-right
-        self.preview_canvas.create_line(pb4, pb8, **warning_style) # connect-top-left
+        draw_warning_line(pb1, pb5) # connect-bottom-left
+        draw_warning_line(pb2, pb6) # connect-bottom-right
+        draw_warning_line(pb3, pb7) # connect-top-right
+        draw_warning_line(pb4, pb8) # connect-top-left
         
         # Label
         self.preview_canvas.create_text((pb4[0] + pb8[0])/2, pb8[1] - 5,
@@ -831,21 +861,31 @@ class PatternGeneratorGUI:
             p7 = project(params['x_max'], params['y_max'], params['z_max']) # Back-top-right
             p8 = project(params['x_min'], params['y_max'], params['z_max']) # Back-top-left
             
-            # Hidden edges
-            self.preview_canvas.create_line(p2, p6, **visible_style)
-            self.preview_canvas.create_line(p1, p2, **visible_style)
-            self.preview_canvas.create_line(p2, p3, **visible_style)
-            self.preview_canvas.create_line(p3, p4, **visible_style)
-            self.preview_canvas.create_line(p4, p1, **visible_style)
+            # Helper for hidden style edges
+            def draw_hidden_line(start, end):
+                self.preview_canvas.create_line(start, end, fill=self.COLOR_ACCENT_CYAN, dash=(2, 4), width=1)
+                
+            # Helper for visible style edges
+            def draw_visible_line(start, end):
+                self.preview_canvas.create_line(start, end, fill=self.COLOR_ACCENT_CYAN, width=2)
+            
+
+            # Hidden edges - POINT 2 IS THE FOCAL POINT OF HIDDEN LINES.
+            draw_hidden_line(p2, p6)
+            draw_hidden_line(p1, p2)
+            draw_hidden_line(p2, p3)
+            
 
             # Visible edges
-            self.preview_canvas.create_line(p3, p7, **visible_style)
-            self.preview_canvas.create_line(p4, p8, **visible_style)
-            self.preview_canvas.create_line(p7, p8, **visible_style)
-            self.preview_canvas.create_line(p6, p7, **visible_style)
-            self.preview_canvas.create_line(p5, p6, **visible_style)
-            self.preview_canvas.create_line(p8, p5, **visible_style)
-            self.preview_canvas.create_line(p1, p5, **visible_style)
+            draw_visible_line(p5, p6)
+            draw_visible_line(p6, p7)
+            draw_visible_line(p3, p4)
+            draw_visible_line(p4, p1)
+            draw_visible_line(p3, p7)
+            draw_visible_line(p4, p8)
+            draw_visible_line(p7, p8)
+            draw_visible_line(p8, p5)
+            draw_visible_line(p1, p5)
 
 
         # --- Draw Origin Marker ---
@@ -1099,7 +1139,7 @@ class PatternGeneratorGUI:
         if total_seconds < 0: return "0s"
         total_seconds = int(total_seconds)
         d, rem = divmod(total_seconds, 86400); h, rem = divmod(rem, 3600); m, s = divmod(rem, 60)
-        parts = []
+        parts: list[str] = []
         if d > 0: parts.append(f"{d}d")
         if h > 0: parts.append(f"{h}h")
         if m > 0: parts.append(f"{m}m")
@@ -1107,23 +1147,75 @@ class PatternGeneratorGUI:
         return " ".join(parts)
 
     def _calculate_estimated_time(self, params, total_points):
-        """ Calculates estimated time with high accuracy, including inter-rotation moves. """
+        """ Calculates estimated time with high accuracy, modeling linear acceleration. """
         if total_points == 0 or params is None: return 0
         total_pause_s = max(0, (total_points - 1) * params['pause_time'])
-        travelspeed_mms = params['travelspeed'] / 60.0
-        if travelspeed_mms <= 0: return total_pause_s
+        
+        # v_max in mm/s
+        v_max = params['travelspeed'] / 60.0
+        if v_max <= 0: return total_pause_s
+        
+        # Standard acceleration for typical entry-level 3D printers
+        accel = 500.0 # mm/s^2 
+        
+        # Time and distance to reach v_max from 0
+        t_accel = v_max / accel
+        d_accel = 0.5 * accel * (t_accel ** 2)
+        
+        def calculate_move_time(distance):
+            if distance <= 0: return 0
+            if distance >= 2 * d_accel:
+                # Can reach full speed
+                d_cruise = distance - 2 * d_accel
+                t_cruise = d_cruise / v_max
+                return 2 * t_accel + t_cruise
+            else:
+                # Triangular velocity profile (doesn't reach v_max)
+                t_half = math.sqrt(distance / accel)
+                return 2 * t_half
+
         def count_steps(min_v, max_v, stp):
             if min_v > max_v: return 0
             if stp == 0: return 1
             return int(math.floor((max_v - min_v) / stp + 1e-9)) + 1
-        nx, ny, nz, n_rot = [count_steps(params[f'{ax}_min'], params[f'{ax}_max'], params[f'{ax}_step']) for ax in ['x', 'y', 'z', 'rot']]
-        total_dist = 0
-        xr, yr, zr = params['x_max'] - params['x_min'], params['y_max'] - params['y_min'], params['z_max'] - params['z_min']
-        if nx > 1: total_dist += (nx - 1) * ny * nz * n_rot * params['x_step']
-        if ny > 1: total_dist += (ny - 1) * nz * n_rot * math.sqrt(xr ** 2 + params['y_step'] ** 2)
-        if nz > 1: total_dist += (nz - 1) * n_rot * math.sqrt(xr ** 2 + yr ** 2 + params['z_step'] ** 2)
-        if n_rot > 1: total_dist += (n_rot - 1) * math.sqrt(xr ** 2 + yr ** 2 + zr ** 2)
-        total_travel_s = total_dist / travelspeed_mms if travelspeed_mms > 0 else 0
+            
+        nx = count_steps(params['x_min'], params['x_max'], params['x_step'])
+        ny = count_steps(params['y_min'], params['y_max'], params['y_step'])
+        nz = count_steps(params['z_min'], params['z_max'], params['z_step'])
+        n_rot = count_steps(params['rot_min'], params['rot_max'], params['rot_step'])
+        
+        total_travel_s = 0.0
+
+        # Based on actual serpentine path generated by create_pattern:
+        # 1. We move X by x_step for (nx - 1) times per line.
+        if nx > 1:
+            dist_x = params['x_step']
+            time_x = calculate_move_time(dist_x)
+            # This happens (nx-1) times per Y-line, for every Y, Z, Rot
+            total_travel_s += (nx - 1) * ny * nz * n_rot * time_x
+            
+        # 2. At the end of every X-line, we step Y by y_step
+        if ny > 1:
+            dist_y = params['y_step']
+            time_y = calculate_move_time(dist_y)
+            # This happens (ny-1) times per Z-plane, for every Z, Rot
+            total_travel_s += (ny - 1) * nz * n_rot * time_y
+            
+        # 3. At the end of every Z-plane, we step Z by z_step
+        if nz > 1:
+            dist_z = params['z_step']
+            time_z = calculate_move_time(dist_z)
+            # This happens (nz-1) times per Rot
+            total_travel_s += (nz - 1) * n_rot * time_z
+            
+        # 4. At the end of every Rotation, we step Rot by rot_step
+        if n_rot > 1:
+            # We treat rotation purely as a travel distance in coordinate space for timing purposes
+            # Assuming standard E travel limits might differ but using same v_max for simplicity here
+            dist_rot = params['rot_step'] 
+            time_rot = calculate_move_time(dist_rot)
+            total_travel_s += (n_rot - 1) * time_rot
+            
         return total_travel_s + total_pause_s
 
         # --- MODIFIED: bounds_warnings is now just the list of strings ---
@@ -1261,6 +1353,17 @@ class PatternGeneratorGUI:
         total_points = self._calculate_total_points(params)
         if total_points == 0: 
             messagebox.showerror("Error", "Pattern has 0 points."); return
+            
+        # --- NEW: Bounds Override Check ---
+        bounds_warnings, warning_level = self._check_printer_bounds(params)
+        if warning_level == 2:
+            warning_msg = "SAFETY WARNING:\n\nThe pattern exceeds the physical printer limits:\n"
+            for w in bounds_warnings:
+                warning_msg += f"- {w}\n"
+            warning_msg += "\nThis may cause hardware damage or crashes.\nAre you absolutely sure you want to generate this file?"
+            if not messagebox.askyesno("Safety Override", warning_msg, icon='warning'):
+                return
+        # --- END NEW ---
         
         if total_points > 1_000_000:
             if not messagebox.askokcancel("Warning: Large File", f"This pattern contains {total_points:,} points.\nGenerating this file may take some time.\n\nContinue?"): 
@@ -1389,22 +1492,22 @@ class PatternGeneratorGUI:
             with open(fname, 'r') as f:
                 for line in f:
                     if line.startswith(MAGIC_PREFIX):
-                        json_string = line[len(MAGIC_PREFIX):]
+                        json_string = line.removeprefix(MAGIC_PREFIX)
                         profile_data = json.loads(json_string)
                         break
 
-            if profile_data is None:
-                messagebox.showerror("Error", "No profile data found in this G-code file.")
+            if not isinstance(profile_data, dict):
+                messagebox.showerror("Error", "No valid profile data found in this G-code file.")
                 return
 
             # --- Populate the UI from the loaded data ---
             def set_widget(widget, key):
-                if key in profile_data:
+                if profile_data and key in profile_data:
                     widget.delete(0, tk.END)
                     widget.insert(0, str(profile_data[key]))
             
             def set_var(var, key, default=None):
-                if key in profile_data:
+                if profile_data and key in profile_data:
                     var.set(profile_data[key])
                 elif default is not None:
                     var.set(default)
@@ -1484,8 +1587,7 @@ class PatternGeneratorGUI:
         for i, pos in enumerate(pattern_generator, 1):
             if i % 10000 == 0: yield f"; --- Progress: {i:,}/{total_points:,} ---"
             yield f"; Pos {i}"
-            yield f"G1 X{pos['x']:.3f} Y{pos['y']:.3f} Z{pos['z']:.3f} F{params['travelspeed']:.0f}"
-            if pos['rotation'] != 0: yield f"; Rotation: {pos['rotation']:.1f} deg (4th axis?)"
+            yield f"G1 X{pos['x']:.3f} Y{pos['y']:.3f} Z{pos['z']:.3f} E{pos['rotation']:.3f} F{params['travelspeed']:.0f}"
             if params['pause_time'] > 0 and i < total_points: yield f"G4 P{int(params['pause_time'] * 1000)} ; Pause"
             yield ""
         yield "; === END ==="
@@ -1523,8 +1625,8 @@ if __name__ == "__main__":
     
     # --- A simple fix for blurry fonts on Windows ---
     try:
-        from ctypes import windll
-        windll.shcore.SetProcessDpiAwareness(1)
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1) # type: ignore
     except Exception:
         pass 
         

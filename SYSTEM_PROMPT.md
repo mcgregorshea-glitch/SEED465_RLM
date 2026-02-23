@@ -13,7 +13,7 @@ The SEED project is designed to control a 3D printer for precise scan patterns. 
 - **Visuals**: Matplotlib (for 3D toolpath visualization) and native Tkinter Canvas (for 2D views).
 - **Communication**: `pyserial` for 3D printer control (G-code over USB/Serial).
 - **Measurement**: `pyvisa` for DMM integration (TCPIP/VISA).
-- **Hardware Integration**: `RPi.GPIO` for limit switch monitoring (specifically Z-max safety).
+- **Hardware Integration**: `RPi.GPIO` for switch monitoring if required.
 
 ## Coding Standards & Conventions
 - **GUI Styling**: Adhere to the established "Dark Theme" palette:
@@ -25,10 +25,7 @@ The SEED project is designed to control a 3D printer for precise scan patterns. 
 - **Safety**: Always perform boundary checks against `PRINTER_LIMITS` or `PRINTER_BOUNDS` before sending or generating movement commands.
 - **Documentation**: Maintain the `CODEREFERENCE.md` for high-level logic explanations.
 
-## Hardware Context & Known Issues
-- **Target Platform**: Primarily Raspberry Pi for the G-Code Sender.
-- **Z-Max Pin**: Configured on **GPIO 4 (BCM)**. Note: Some older documentation may incorrectly reference GPIO 17.
-- **Z-Axis Issue**: There is a known hardware/calibration issue where the Z-axis motor may refuse to move down. Be cautious with Z-axis commands and always respect the Z-max limit switch.
+- **Testing**: Follow normal testing procedures.
 - **Coordinate Systems**: 
     - Generator uses centered coordinates (e.g., -110 to +110).
     - Sender uses absolute firmware coordinates (e.g., 0 to 220). The Sender handles the translation based on a user-defined "Center".
@@ -37,6 +34,6 @@ The SEED project is designed to control a 3D printer for precise scan patterns. 
 - **Refactoring UI**: Ensure `ttk.Style` is used for consistency.
 - **Adding DMMs**: Update `DMM_CONFIG` in `src/gcode_sender.py`.
 - **Debugging Serial**: Check `gcode_sender_thread` and serial handshake logic.
-- **Testing**: Use `src/test_zmax.py` to verify limit switch functionality on the Pi.
+- **Testing**: Test any UI or G-code generation logic via standard runs.
 
 When performing tasks, always verify if changes impact the coordinate translation logic or safety boundary checks.
