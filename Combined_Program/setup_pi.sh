@@ -1,17 +1,26 @@
 #!/bin/bash
-# Description: Setup script for Raspberry Pi
+# Description: Robust setup script for Raspberry Pi
 # Creates a Python virtual environment and installs required packages
+
+set -e # Exit immediately if a command exits with a non-zero status
 
 echo "Starting SEED Program Setup for Raspberry Pi..."
 
-# Check if python3-venv is installed, install if missing
+# 1. Ensure we are in the correct directory
+if [ ! -f "requirements.txt" ]; then
+    echo "ERROR: requirements.txt not found in current directory!"
+    echo "Please run this script from inside the Combined_Program folder."
+    exit 1
+fi
+
+# 2. Check if python3-venv is installed
 if ! dpkg -s python3-venv >/dev/null 2>&1; then
-    echo "Installing python3-venv..."
+    echo "Installing python3-venv (requires sudo privileges)..."
     sudo apt-get update
     sudo apt-get install -y python3-venv
 fi
 
-# Create virtual environment if it doesn't exist
+# 3. Create virtual environment
 if [ ! -d ".venv" ]; then
     echo "Creating virtual environment '.venv'..."
     python3 -m venv .venv
@@ -19,25 +28,24 @@ else
     echo "Virtual environment already exists."
 fi
 
-# Activate virtual environment
+# 4. Verify .venv was created successfully
+if [ ! -f ".venv/bin/activate" ]; then
+    echo "ERROR: Virtual environment was not created successfully."
+    echo "Try running: sudo apt install python3-venv -y"
+    exit 1
+fi
+
+# 5. Activate environment
 echo "Activating virtual environment..."
 source .venv/bin/activate
 
-# Upgrade pip
-echo "Upgrading pip..."
+# 6. Install dependencies
+echo "Upgrading pip and installing requirements..."
 pip install --upgrade pip
-
-# Install requirements
-echo "Installing Python dependencies..."
 pip install -r requirements.txt
 
-# Additional instructions for the user
 echo ""
 echo "==========================================================="
 echo "Setup Complete!"
-echo ""
-echo "To run the application, ALWAYS activate the environment first:"
-echo "    source .venv/bin/activate"
-echo "Then launch it using:"
-echo "    python main.py"
+echo "To run the app: source .venv/bin/activate && python main.py"
 echo "==========================================================="
