@@ -28,13 +28,26 @@ except ImportError:
 
 # --- DMM Integration Classes ---
 DMM_CONFIG = [
-    # [120, 100, 'VINP'],
-    # [104, 100, 'IINP', 1e3],
-    # [107, 100, 'VSYS'],
-    # [103, 100, 'SAUX', 1e3],
-    [102, 1, 'MyDMM'], # Updated for 10.123.210.102
-    # [109, 100, 'SINV', 1e3],
+    [120, 100, 'VINP'],
+    [104, 100, 'IINP', 1e3],
+    [107, 100, 'VSYS'],
+    [103, 100, 'SAUX', 1e3],
+    [102, 100, 'VINV'],
+    [109, 100, 'SINV', 1e3],
 ]
+
+# Map of user-friendly names to SCPI mode strings
+DMM_MODES = {
+    "DC Voltage": "VOLT:DC",
+    "AC Voltage": "VOLT:AC",
+    "DC Current": "CURR:DC",
+    "AC Current": "CURR:AC",
+    "2W Resistance": "RES",
+    "4W Resistance": "FRES",
+    "Frequency": "FREQ",
+    "Continuity": "CONT",
+    "Diode": "DIOD",
+}
 
 
 class DmmInst:
@@ -47,17 +60,25 @@ class DmmInst:
 
     def connect(self, pvrmgr: Any) -> None:
         if not pvrmgr: return
-        # Using the IP schema from dmm-example.py
-        id_str = f'TCPIP0::10.123.210.{self.id}::inst0::INSTR' 
-        print(f"Attempting to connect to DMM: {id_str}")
+        id_str = f'TCPIP0::10.123.210.{self.id}::inst0::INSTR'
         try:
             self.pv = pvrmgr.open_resource(id_str)
-            print(f"Connected to DMM {self.id}")
+            self.pv.timeout = 60000  # 60 second VISA timeout
         except Exception as e:
-            print(f"Failed to connect to DMM {self.id}: {e}")
+            self.pv = None
+            raise ConnectionError(
+                f"Failed to connect to DMM '{self.name}' at {id_str}.\n"
+                f"Error: {e}\n"
+                f"Troubleshooting:\n"
+                f"  1. Verify the DMM is powered on and connected to the network\n"
+                f"  2. Confirm IP address 10.123.210.{self.id} is reachable (try ping)\n"
+                f"  3. Check that no other software is using this VISA resource\n"
+                f"  4. Ensure NI-VISA or Keysight IO Libraries are installed"
+            )
 
-    def setup(self) -> None:
+    def setup(self, mode: str = 'VOLT:DC') -> None:
         if self.pv:
+            self.pv.write(f'CONF:{mode}')
             self.pv.write(f'SAMP:COUN {self.samples}')
             self.pv.write(f'CALC:AVER:STAT ON')
 
@@ -83,14 +104,23 @@ class DmmGroup:
             self.dmms.append(DmmInst(*info)) # type: ignore
         self.pvrmgr: Any = None
 
-    def initialize(self) -> None:
+    def initialize(self, mode: str = 'VOLT:DC') -> None:
         if not HAS_PYVISA or not ResourceManager:
-            raise ImportError("pyvisa not installed")
+            raise ImportError(
+                "PyVISA is not installed. Install with:\n"
+                "  pip install pyvisa pyvisa-py"
+            )
         self.pvrmgr = ResourceManager()
+        errors = []
         for dmm in self.dmms:
-            dmm.connect(self.pvrmgr)
+            try:
+                dmm.connect(self.pvrmgr)
+            except ConnectionError as e:
+                errors.append(str(e))
+        if errors:
+            raise ConnectionError("\n\n".join(errors))
         for dmm in self.dmms:
-            dmm.setup()
+            dmm.setup(mode)
 
     def trigger(self) -> None:
         for dmm in self.dmms:
@@ -100,7 +130,7 @@ class DmmGroup:
         # Block until all DMMs are ready
         ready = False
         start_time = time.time()
-        timeout = 5.0 # 5 seconds timeout
+        timeout = 60.0 # 60 seconds timeout
 
         while not ready:
             if time.time() - start_time > timeout:
@@ -449,6 +479,7 @@ class GCodeSenderGUI:
         self.measurement_log_file = None # Internal file handle/flag
         self.log_filepath_var = tk.StringVar(value="") # Initialize empty, set on G-code load
         self.dmm_status_var = tk.StringVar(value="DMMs: Disconnected")
+        self.dmm_mode_var = tk.StringVar(value="DC Voltage")
         self.last_measurement_var = tk.StringVar(value="Last: --")
         self.stability_threshold_var = tk.DoubleVar(value=1.0) # 1.0%
         self.max_retries_var = tk.IntVar(value=10)
@@ -741,6 +772,19 @@ class GCodeSenderGUI:
         
         ttk.Label(conn_frame, textvariable=self.dmm_status_var, style='Filepath.TLabel').pack(side=tk.LEFT)
 
+        # DMM Mode Selector
+        mode_frame = ttk.Frame(frame, style='Panel.TFrame')
+        mode_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(mode_frame, text="Mode:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
+        self.dmm_mode_combo = ttk.Combobox(
+            mode_frame, textvariable=self.dmm_mode_var,
+            values=list(DMM_MODES.keys()), state="readonly",
+            width=15, font=self.FONT_MONO
+        )
+        self.dmm_mode_combo.pack(side=tk.LEFT, padx=(5, 10))
+        self.dmm_mode_combo.bind('<<ComboboxSelected>>', self._on_dmm_mode_change)
+
         # Auto Measure Toggle
         opts_frame = ttk.Frame(frame, style='Panel.TFrame')
         opts_frame.pack(fill=tk.X, pady=(0, 5))
@@ -793,6 +837,24 @@ class GCodeSenderGUI:
             self.log_message("Auto-measurement ENABLED. DMMs will trigger after every move.", "INFO")
         else:
             self.log_message("Auto-measurement DISABLED.", "INFO")
+
+    def _on_dmm_mode_change(self, event=None):
+        """Called when the user selects a new DMM measurement mode from the dropdown."""
+        mode_name = self.dmm_mode_var.get()
+        scpi_mode = DMM_MODES.get(mode_name, 'VOLT:DC')
+        self.log_message(f"DMM Mode changed to: {mode_name} ({scpi_mode})", "INFO")
+        
+        # If DMMs are already connected, reconfigure them live
+        if self.is_dmm_connected and self.dmm_group:
+            try:
+                for dmm in self.dmm_group.dmms:
+                    if dmm.pv:
+                        dmm.pv.write(f'CONF:{scpi_mode}')
+                        dmm.pv.write(f'SAMP:COUN {dmm.samples}')
+                        dmm.pv.write(f'CALC:AVER:STAT ON')
+                self.log_message(f"All DMMs reconfigured to {mode_name}.", "SUCCESS")
+            except Exception as e:
+                self.log_message(f"Error changing DMM mode: {e}", "ERROR")
 
 
     def create_control_frame(self, parent):
@@ -3966,12 +4028,13 @@ class GCodeSenderGUI:
                 self.message_queue.put(("DMM_FAIL", "PyVISA Missing"))
                 return
 
-            self.queue_message("Initializing DMMs...")
+            selected_mode = DMM_MODES.get(self.dmm_mode_var.get(), 'VOLT:DC')
+            self.queue_message(f"Initializing DMMs (Mode: {self.dmm_mode_var.get()})...")
             self.dmm_group = DmmGroup(DMM_CONFIG)
-            self.dmm_group.initialize()
+            self.dmm_group.initialize(mode=selected_mode)
             self.message_queue.put(("DMM_CONNECTED", None))
         except Exception as e:
-            self.queue_message(f"DMM Connect Error: {e}", "ERROR")
+            self.queue_message(f"DMM Connect Error:\n{e}", "ERROR")
             self.message_queue.put(("DMM_FAIL", str(e)))
 
     def disconnect_dmms(self):

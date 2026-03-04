@@ -1,33 +1,154 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import serial
+import serial # type: ignore
 import time
 import re
 import threading
 import queue
 import serial.tools.list_ports # For port scanning
+import csv
+from datetime import datetime
+import os
+from typing import Any, Optional, Dict, List, Tuple
+
+# Optional PyVISA import for DMM control
+try:
+    from pyvisa import ResourceManager # type: ignore
+    HAS_PYVISA = True
+except ImportError:
+    ResourceManager = None
+    HAS_PYVISA = False
+
+# Optional RPi.GPIO import for limit switches
+try:
+    import RPi.GPIO as GPIO # type: ignore
+    HAS_GPIO = True
+except ImportError:
+    GPIO = None
+    HAS_GPIO = False
 
 # Optional numpy import for memory optimization
 try:
-    import numpy as np
+    import numpy as np # type: ignore
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
 
+# --- DMM Integration Classes ---
+DMM_CONFIG = [
+    # [120, 100, 'VINP'],
+    # [104, 100, 'IINP', 1e3],
+    # [107, 100, 'VSYS'],
+    # [103, 100, 'SAUX', 1e3],
+    [102, 1, 'MyDMM'], # Updated for 10.123.210.102
+    # [109, 100, 'SINV', 1e3],
+]
+
+# --- GPIO CONFIGURATION ---
+# The GPIO pin (BCM numbering) connected to the Z-Max limit switch.
+Z_MAX_LIMIT_PIN = 4
+Z_PROBE_SPEED = 150 # mm/min
+
+
+class DmmInst:
+    def __init__(self, id: int, samples: int, name: str, scale: float = 1) -> None:
+        self.id = id
+        self.samples = samples
+        self.name = name
+        self.scale = scale
+        self.pv: Any = None
+
+    def connect(self, pvrmgr: Any) -> None:
+        if not pvrmgr: return
+        # Using the IP schema from dmm-example.py
+        id_str = f'TCPIP0::10.123.210.{self.id}::inst0::INSTR' 
+        print(f"Attempting to connect to DMM: {id_str}")
+        try:
+            self.pv = pvrmgr.open_resource(id_str)
+            print(f"Connected to DMM {self.id}")
+        except Exception as e:
+            print(f"Failed to connect to DMM {self.id}: {e}")
+
+    def setup(self) -> None:
+        if self.pv:
+            self.pv.write(f'SAMP:COUN {self.samples}')
+            self.pv.write(f'CALC:AVER:STAT ON')
+
+    def trigger(self) -> None:
+        if self.pv:
+            self.pv.write('INIT')
+
+    def ready(self) -> bool:
+        if self.pv:
+            return int(self.pv.query_ascii_values('CALC:AVER:COUN?')[0]) >= self.samples
+        return False
+
+    def read(self) -> float:
+        if self.pv:
+            return float(self.pv.query_ascii_values('CALC:AVER:ALL?')[0]) * self.scale
+        return 0.0
+
+
+class DmmGroup:
+    def __init__(self, config: list) -> None:
+        self.dmms: list[DmmInst] = []
+        for info in config:
+            self.dmms.append(DmmInst(*info)) # type: ignore
+        self.pvrmgr: Any = None
+
+    def initialize(self) -> None:
+        if not HAS_PYVISA or not ResourceManager:
+            raise ImportError("pyvisa not installed")
+        self.pvrmgr = ResourceManager()
+        for dmm in self.dmms:
+            dmm.connect(self.pvrmgr)
+        for dmm in self.dmms:
+            dmm.setup()
+
+    def trigger(self) -> None:
+        for dmm in self.dmms:
+            dmm.trigger()
+
+    def read(self) -> list:
+        # Block until all DMMs are ready
+        ready = False
+        start_time = time.time()
+        timeout = 5.0 # 5 seconds timeout
+
+        while not ready:
+            if time.time() - start_time > timeout:
+                print(f"TIMEOUT: DMM measurement took longer than {timeout}s.")
+                print("LIMITATION: Measurement timed out. Returning 0.0. Ensure DMM is not waiting for an external trigger.")
+                return [0.0] * len(self.dmms)
+
+            ready = True
+            for dmm in self.dmms:
+                ready &= dmm.ready()
+            if not ready:
+                time.sleep(0.1) 
+                
+        values = []
+        for dmm in self.dmms:
+            values.append(dmm.read())
+        return values
+        
+    def close(self):
+        if self.pvrmgr:
+            for dmm in self.dmms:
+                if dmm.pv:
+                    try: 
+                        dmm.pv.close()
+                    except Exception: 
+                        pass
+            try: 
+                self.pvrmgr.close()
+            except Exception: 
+                pass
+
+
 class GCodeSenderGUI:
     """
     A graphical user interface for sending G-code to a 3D printer or CNC machine.
-
-    This application provides a comprehensive set of controls for printer operations,
-    including:
-    - Serial connection management with port and baud rate selection.
-    - Loading G-code files and processing them into a machine-friendly format.
-    - Translating G-code coordinates relative to a user-defined "center" point.
-    - Visual toolpath preview for both XY (top-down) and Z (side) axes.
-    - Real-time progress tracking and display.
-    - Manual jogging, homing, and "Go To" position controls.
-    - A terminal for sending custom G-code commands.
-    - Emergency Stop (M112) and Quick Stop (M410) functionality.
     """
     def __init__(self, root):
         self.root = root
@@ -141,6 +262,7 @@ class GCodeSenderGUI:
 
         # --- Jog Buttons ---
         style.configure('Jog.TButton', font=self.FONT_BODY_BOLD, width=5, padding=(10, 10))
+        style.configure('JogIcon.TButton', font=("Inter", 18, "bold"), width=5, padding=(4, 4))
         style.configure('Home.TButton', font=self.FONT_BODY_BOLD_LARGE, width=5, padding=(4, 4))
 
         style.configure('ViewCube.TButton', padding=(2, 2), font=("Inter", 12), width=2)
@@ -148,15 +270,15 @@ class GCodeSenderGUI:
             background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)],
             foreground=[('active', self.COLOR_ACCENT_CYAN)])
 
-        # --- Sci-Fi Toggle Button Styles ---
-        sci_fi_font = ("Rajdhani", 9, "bold")
+        # --- Toggle Button Styles ---
+        custom_font = ("Rajdhani", 9, "bold")
         padding = (5, 3)
         # Style for the "Off" (disabled) state
-        style.configure('SciFi.Toggle.Off.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_SECONDARY, bordercolor=self.COLOR_BORDER, font=sci_fi_font, padding=padding)
-        style.map('SciFi.Toggle.Off.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)], foreground=[('active', self.COLOR_ACCENT_CYAN)])
+        style.configure('Custom.Toggle.Off.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_SECONDARY, bordercolor=self.COLOR_BORDER, font=custom_font, padding=padding)
+        style.map('Custom.Toggle.Off.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)], foreground=[('active', self.COLOR_ACCENT_CYAN)])
         # Style for the "On" (enabled) state - dark with illuminated border/text
-        style.configure('SciFi.Toggle.On.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_ACCENT_CYAN, bordercolor=self.COLOR_ACCENT_CYAN, font=sci_fi_font, padding=padding)
-        style.map('SciFi.Toggle.On.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)])
+        style.configure('Custom.Toggle.On.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_ACCENT_CYAN, bordercolor=self.COLOR_ACCENT_CYAN, font=custom_font, padding=padding)
+        style.map('Custom.Toggle.On.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)])
 
         # --- Entry (Input) Style ---
         style.configure('TEntry',
@@ -223,6 +345,8 @@ class GCodeSenderGUI:
         self.is_sending = False
         self.is_paused = False
         self.is_manual_command_running = False
+        self.is_calibrating = False
+        self.rotation_crash_test_complete = False
         
         # Threading events for controlling background tasks (sending G-code, connecting)
         self.stop_event = threading.Event()
@@ -238,11 +362,11 @@ class GCodeSenderGUI:
         self.history_index = 0
         
         # Data structures for visualizing the G-code toolpath
-        self.toolpath_by_layer = {}   # {z_level: [((x1,y1),(x2,y2)), ...], ...}
-        self.move_to_layer_map = []   # [(z_level, index_on_layer), ...]
-        self.ordered_z_values = []    # [z1, z2, z3, ...]
-        self.completed_move_count = 0 # How many moves have been completed so far
-        self.after_id = None          # To store the ID of the recurring 'after' job
+        self.toolpath_by_layer: Dict[float, List[Any]] = {}   # {z_level: [((x1,y1),(x2,y2)), ...], ...}
+        self.move_to_layer_map: List[Any] = []   # [(z_level, index_on_layer), ...]
+        self.ordered_z_values: List[float] = []    # [z1, z2, z3, ...]
+        self.completed_move_count: int = 0 # How many moves have been completed so far
+        self.after_id: Any = None          # To store the ID of the recurring 'after' job
 
         # Cache for the 3D plot coordinates to avoid recalculating them on every redraw
         self._plot_coords_cache = None
@@ -255,7 +379,8 @@ class GCodeSenderGUI:
         self.is_2d_plot_enabled = tk.BooleanVar(value=True)
 
         # --- Printer Physical Bounds (in mm) ---
-        self.PRINTER_BOUNDS = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 250 }
+        # E is 'Rotation' (repurposed extruder), units are now DEGREES. Firmware must be configured accordingly (e.g., M92 E8.888).
+        self.PRINTER_BOUNDS: Dict[str, float] = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 250, 'e_min': -10000, 'e_max': 10000 }
 
         # --- Tkinter StringVars (for dynamically updating GUI labels) ---
         self.file_path_var = tk.StringVar(value="No file selected")
@@ -266,8 +391,28 @@ class GCodeSenderGUI:
         self.port_var = tk.StringVar(value=self.available_ports[0] if self.available_ports else "")
         self.baud_var = tk.StringVar(value="115200")
         self.connection_status_var = tk.StringVar(value="Status: Disconnected")
+
+        # --- DMM / Measurement State ---
+        self.dmm_group = None
+        self.is_dmm_connected = False
+        self.auto_measure_enabled = tk.BooleanVar(value=False)
+        self.log_measurements_enabled = tk.BooleanVar(value=True)
+        self.measurement_log_file = None # Internal file handle/flag
+        self.log_filepath_var = tk.StringVar(value="") # Initialize empty, set on G-code load
+        self.dmm_status_var = tk.StringVar(value="DMMs: Disconnected")
+        self.last_measurement_var = tk.StringVar(value="Last: --")
+        self.stability_threshold_var = tk.DoubleVar(value=1.0) # 1.0%
+        self.max_retries_var = tk.IntVar(value=10)
+        self.measurements_per_point_var = tk.IntVar(value=3)
+        self.pre_measure_delay_var = tk.DoubleVar(value=0.5) # seconds
+
+
         self.jog_step_var = tk.StringVar(value="10")
         self.jog_feedrate_var = tk.StringVar(value="1000")
+        self.rotation_step_var = tk.StringVar(value="5")
+        self.rotation_feedrate_var = tk.StringVar(value="3000")
+        self.mm_per_degree_var = tk.DoubleVar(value=8.888) # Calibration: MM extrusion per Degree of tilt
+        
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label_var = tk.StringVar(value="Progress: Idle")
         self.total_lines_to_send = 0
@@ -277,9 +422,12 @@ class GCodeSenderGUI:
         self.goto_x_display_var = tk.StringVar(value="0.00")
         self.goto_y_display_var = tk.StringVar(value="0.00")
         self.goto_z_display_var = tk.StringVar(value="0.00")
+        self.goto_e_display_var = tk.StringVar(value="0.00")
+        
         self.last_cmd_x_display_var = tk.StringVar(value="N/A")
         self.last_cmd_y_display_var = tk.StringVar(value="N/A")
         self.last_cmd_z_display_var = tk.StringVar(value="N/A")
+        self.last_cmd_e_display_var = tk.StringVar(value="N/A")
         
         # StringVars for the header and footer bars
         self.header_file_var = tk.StringVar(value="NO FILE")
@@ -294,20 +442,27 @@ class GCodeSenderGUI:
         self.target_abs_x = self.PRINTER_BOUNDS['x_max'] / 2
         self.target_abs_y = self.PRINTER_BOUNDS['y_max'] / 2
         self.target_abs_z = self.PRINTER_BOUNDS['z_max'] / 4
+        self.target_abs_e = 0.0
         
         # The 'last commanded' position (red marker on canvas), where the printer SHOULD be.
-        self.last_cmd_abs_x = None # Use None to indicate the position is not yet known.
-        self.last_cmd_abs_y = None
-        self.last_cmd_abs_z = None
+        self.last_cmd_abs_x: Optional[float] = None # Use None to indicate the position is not yet known.
+        self.last_cmd_abs_y: Optional[float] = None
+        self.last_cmd_abs_z: Optional[float] = None
+        self.last_cmd_abs_e = None
         
         # The current coordinate display mode ('absolute' or 'relative' to the center point).
         self.coord_mode = tk.StringVar(value="absolute")
 
         # --- Build the main GUI layout ---
-        self.create_header_bar(self.root)
+        # Container for the standard view (Header, Panels, Footer)
+        self.main_view_frame = ttk.Frame(root, style='TFrame')
+        self.main_view_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.create_header_bar(self.main_view_frame)
 
         # The main layout is a PanedWindow, which allows the user to resize the left and right panels.
-        main_container = ttk.Frame(root, padding=5, style='TFrame')
+        # Note: This is now packed into self.main_view_frame
+        main_container = ttk.Frame(self.main_view_frame, padding=5, style='TFrame')
         main_container.pack(fill=tk.BOTH, expand=True)
         
         self.paned_window = tk.PanedWindow(main_container, orient=tk.HORIZONTAL, sashrelief=tk.FLAT, sashwidth=6, bg=self.COLOR_BG, showhandle=False)
@@ -381,6 +536,7 @@ class GCodeSenderGUI:
 
         # --- Populate the GUI panels ---
         self.create_connection_frame(self.left_panel_scrollable)
+        self.create_measurement_frame(self.left_panel_scrollable)
         self.create_file_center_frame(self.left_panel_scrollable)
         self.create_control_frame(self.left_panel_scrollable)
         self.create_progress_frame(self.left_panel_scrollable)
@@ -391,7 +547,7 @@ class GCodeSenderGUI:
         self.create_log_panel(cli_tab)
         self.create_3d_display_panel(display_tab)
         
-        self.create_footer_bar(self.root)
+        self.create_footer_bar(self.main_view_frame)
 
         # --- Final Layout Adjustments ---
         # This section ensures the left panel is sized correctly on startup.
@@ -412,6 +568,49 @@ class GCodeSenderGUI:
         self.root.after(300, self.rescan_ports)
         # Perform an initial update of all display labels and canvases.
         self.root.after(150, self._update_all_displays)
+        
+        # Initialize GPIO
+        self._setup_gpio()
+
+    def _setup_gpio(self):
+        """Configures the GPIO pins for the limit switches."""
+        if not HAS_GPIO:
+            self.log_message("GPIO (RPi.GPIO) not available. Limit switch detection DISABLED.", "WARN")
+            return
+
+        try:
+            GPIO.setmode(GPIO.BCM)
+            # Assuming Normally Closed (Switch connects to GND normally, Opens when hit)
+            # Normal State: LOW (GND)
+            # Trigger State: HIGH (Pulled Up)
+            GPIO.setup(Z_MAX_LIMIT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            
+            # Safety Interrupt: Watchdog for Z-Max
+            # Triggers _on_z_max_trigger when switch opens (voltage rises)
+            GPIO.add_event_detect(Z_MAX_LIMIT_PIN, GPIO.RISING, callback=self._on_z_max_trigger, bouncetime=200)
+            
+            # Initial Check: If switch is already open (HIGH), trigger immediately!
+            if GPIO.input(Z_MAX_LIMIT_PIN) == 1:
+                self.log_message("Startup Safety Check: Z-Max is OPEN (Triggered)!", "CRITICAL")
+                self._on_z_max_trigger(Z_MAX_LIMIT_PIN)
+            
+            self.log_message(f"GPIO initialized. Z-Max on Pin {Z_MAX_LIMIT_PIN} (Safety Interrupt Active).", "INFO")
+        except Exception as e:
+            self.log_message(f"GPIO Setup Error: {e}", "WARN")
+
+    def _on_z_max_trigger(self, channel):
+        """Hardware Interrupt: Immediately stops printer if Z-Max is hit."""
+        # Print to system terminal immediately for debugging/confirmation
+        print(f"\n[HARDWARE] !!! Z-MAX LIMIT TRIGGERED on Channel {channel} !!!\n")
+        
+        # Send M112 immediately to the serial port (bypass queue for speed)
+        if self.serial_connection:
+            try:
+                self.serial_connection.write(b'M112\n')
+            except Exception:
+                pass
+        # Notify main thread to handle GUI/Logic cleanup
+        self.message_queue.put(("EMERGENCY_STOP_TRIGGERED", "Z-Max Limit Switch Hit!"))
 
     # --- GUI Creation Methods ---
 
@@ -464,7 +663,14 @@ class GCodeSenderGUI:
         self.center_z_entry.grid(row=1, column=5, sticky="ew", pady=(5,0), padx=(0, 10))
 
         self.mark_center_button = ttk.Button(frame, text="Mark Current\nas Center", command=self._mark_current_as_center, state=tk.DISABLED)
-        self.mark_center_button.grid(row=0, column=6, rowspan=2, sticky="nsew", pady=(0,0), padx=(5,0))
+        self.mark_center_button.grid(row=0, column=6, rowspan=1, sticky="nsew", pady=(0,2), padx=(5,0))
+
+        self.collision_test_button = ttk.Button(frame, text="Collision\nAvoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED) # Initially disabled until connected
+        self.collision_test_button.grid(row=1, column=6, rowspan=1, sticky="nsew", pady=(2,0), padx=(5,0))
+        
+        # Row 2: Calibration
+        ttk.Label(frame, text="E-Cal (mm/°):").grid(row=2, column=0, sticky="w", pady=(5,0));
+        ttk.Entry(frame, textvariable=self.mm_per_degree_var, width=8).grid(row=2, column=1, sticky="ew", pady=(5,0), padx=(0, 5))
         
         # Bind changes in the center entries to update the coordinate displays.
         self.center_x_entry.bind('<FocusOut>', self._on_center_change); self.center_x_entry.bind('<Return>', self._on_center_change)
@@ -500,6 +706,74 @@ class GCodeSenderGUI:
         self.status_label = ttk.Label(frame, textvariable=self.connection_status_var, font=self.FONT_BODY_SMALL, style='Filepath.TLabel'); 
         self.status_label.grid(row=0, column=5, rowspan=2, padx=(0, 0), sticky="w")
         
+
+    def create_measurement_frame(self, parent):
+        """Creates the 'MEASUREMENT' panel."""
+        frame = ttk.LabelFrame(parent, text="MEASUREMENT", padding="10")
+        frame.pack(fill=tk.X, pady=(0, 10), padx=5)
+        
+        # Connect / Status
+        conn_frame = ttk.Frame(frame, style='Panel.TFrame')
+        conn_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.dmm_connect_button = ttk.Button(conn_frame, text="Connect DMMs", command=self.toggle_dmm_connection)
+        self.dmm_connect_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Label(conn_frame, textvariable=self.dmm_status_var, style='Filepath.TLabel').pack(side=tk.LEFT)
+
+        # Auto Measure Toggle
+        opts_frame = ttk.Frame(frame, style='Panel.TFrame')
+        opts_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.auto_measure_check = ttk.Checkbutton(opts_frame, text="Auto-Measure on Move", variable=self.auto_measure_enabled, command=self._on_auto_measure_toggle)
+        self.auto_measure_check.pack(side=tk.LEFT, padx=(0, 15))
+        
+        # Logging Frame
+        log_frame = ttk.Frame(frame, style='Panel.TFrame')
+        log_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        self.log_check = ttk.Checkbutton(log_frame, text="Log to CSV", variable=self.log_measurements_enabled)
+        self.log_check.pack(side=tk.LEFT)
+        
+        self.log_path_entry = ttk.Entry(log_frame, textvariable=self.log_filepath_var, width=15, font=self.FONT_BODY_SMALL)
+        self.log_path_entry.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
+        
+        self.browse_log_btn = ttk.Button(log_frame, text="...", width=3, command=self.select_log_file)
+        self.browse_log_btn.pack(side=tk.LEFT)
+
+        # Settings Frame (Stability)
+        settings_frame = ttk.Frame(frame, style='Panel.TFrame')
+        settings_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Row 1: Threshold & Retries
+        ttk.Label(settings_frame, text="Stability (%):", font=self.FONT_BODY_SMALL).grid(row=0, column=0, sticky="w")
+        ttk.Entry(settings_frame, textvariable=self.stability_threshold_var, width=4, font=self.FONT_MONO).grid(row=0, column=1, sticky="w", padx=5)
+        
+        ttk.Label(settings_frame, text="Max Retries:", font=self.FONT_BODY_SMALL).grid(row=0, column=2, sticky="w", padx=(10, 0))
+        ttk.Entry(settings_frame, textvariable=self.max_retries_var, width=4, font=self.FONT_MONO).grid(row=0, column=3, sticky="w", padx=5)
+
+        # Row 2: Window & Delay
+        ttk.Label(settings_frame, text="Measurements per Point:", font=self.FONT_BODY_SMALL).grid(row=1, column=0, sticky="w", pady=(5,0))
+        ttk.Entry(settings_frame, textvariable=self.measurements_per_point_var, width=4, font=self.FONT_MONO).grid(row=1, column=1, sticky="w", padx=5, pady=(5,0))
+
+        ttk.Label(settings_frame, text="Stabilizing Delay (s):", font=self.FONT_BODY_SMALL).grid(row=1, column=2, sticky="w", padx=(10, 0), pady=(5,0))
+        ttk.Entry(settings_frame, textvariable=self.pre_measure_delay_var, width=4, font=self.FONT_MONO).grid(row=1, column=3, sticky="w", padx=5, pady=(5,0))
+
+        # Manual Trigger & Last Reading
+        ctrl_frame = ttk.Frame(frame, style='Panel.TFrame')
+        ctrl_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        self.measure_button = ttk.Button(ctrl_frame, text="Measure Now", command=self.trigger_manual_measurement, state=tk.DISABLED)
+        self.measure_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Label(ctrl_frame, textvariable=self.last_measurement_var, font=self.FONT_MONO).pack(side=tk.LEFT)
+
+    def _on_auto_measure_toggle(self):
+        if self.auto_measure_enabled.get():
+            self.log_message("Auto-measurement ENABLED. DMMs will trigger after every move.", "INFO")
+        else:
+            self.log_message("Auto-measurement DISABLED.", "INFO")
+
 
     def create_control_frame(self, parent):
         """Creates the 'EXECUTION CONTROL' panel with Start, Pause, and Stop buttons."""
@@ -542,9 +816,9 @@ class GCodeSenderGUI:
         """Applies the 'On' or 'Off' style to the 2D plot toggle button."""
         if not hasattr(self, 'toggle_2d_button'): return
         if self.is_2d_plot_enabled.get():
-            self.toggle_2d_button.config(style='SciFi.Toggle.On.TButton')
+            self.toggle_2d_button.config(style='Custom.Toggle.On.TButton')
         else:
-            self.toggle_2d_button.config(style='SciFi.Toggle.Off.TButton')
+            self.toggle_2d_button.config(style='Custom.Toggle.Off.TButton')
 
     def create_position_control_frame(self, parent):
         """Creates the main panel for position control, including DROs, inputs, and visual canvases."""
@@ -568,21 +842,23 @@ class GCodeSenderGUI:
         dro_frame = ttk.Frame(dro_bg_frame, padding=(10, 5), style='Black.TFrame')
         dro_frame.pack(fill=tk.BOTH, expand=True)
         
-        dro_frame.columnconfigure(1, weight=1); dro_frame.columnconfigure(2, weight=1); dro_frame.columnconfigure(3, weight=1)
+        dro_frame.columnconfigure(1, weight=1); dro_frame.columnconfigure(2, weight=1); dro_frame.columnconfigure(3, weight=1); dro_frame.columnconfigure(4, weight=1)
         
         # Labels for the 'CURRENT' (last commanded) position.
         ttk.Label(dro_frame, text="CURRENT:", style='DRO.TLabel').grid(row=0, column=0, sticky="w"); 
         ttk.Label(dro_frame, textvariable=self.last_cmd_x_display_var, style='Red.DRO.TLabel').grid(row=0, column=1, sticky="ew")
         ttk.Label(dro_frame, textvariable=self.last_cmd_y_display_var, style='Red.DRO.TLabel').grid(row=0, column=2, sticky="ew", padx=5)
         ttk.Label(dro_frame, textvariable=self.last_cmd_z_display_var, style='Red.DRO.TLabel').grid(row=0, column=3, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.last_cmd_e_display_var, style='Red.DRO.TLabel').grid(row=0, column=4, sticky="ew", padx=5)
         
         # Labels for the 'TARGET' (Go To) position.
         ttk.Label(dro_frame, text=" TARGET:", style='DRO.TLabel').grid(row=1, column=0, sticky="w"); 
         ttk.Label(dro_frame, textvariable=self.goto_x_display_var, style='Blue.DRO.TLabel').grid(row=1, column=1, sticky="ew")
         ttk.Label(dro_frame, textvariable=self.goto_y_display_var, style='Blue.DRO.TLabel').grid(row=1, column=2, sticky="ew", padx=5)
         ttk.Label(dro_frame, textvariable=self.goto_z_display_var, style='Blue.DRO.TLabel').grid(row=1, column=3, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.goto_e_display_var, style='Blue.DRO.TLabel').grid(row=1, column=4, sticky="ew", padx=5)
         
-        # --- Frame to hold the XY and Z canvases ---
+        # --- Frame to hold the XY, Z, and E canvases ---
         self.canvas_frame = ttk.Frame(frame, height=150, style='Panel.TFrame')
         self.canvas_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10,0))
         self.canvas_frame.rowconfigure(0, weight=1)
@@ -600,11 +876,14 @@ class GCodeSenderGUI:
 
         ttk.Label(input_frame, text="Set Z:").grid(row=2, column=0, sticky="w"); self.goto_z_entry = ttk.Entry(input_frame, width=8, state=tk.DISABLED); self.goto_z_entry.grid(row=2, column=1, sticky="w", pady=2)
         self.goto_z_entry.bind('<Return>', self._on_goto_entry_commit); self.goto_z_entry.bind('<FocusOut>', self._on_goto_entry_commit)
+
+        ttk.Label(input_frame, text="Set R (°):").grid(row=3, column=0, sticky="w"); self.goto_e_entry = ttk.Entry(input_frame, width=8, state=tk.DISABLED); self.goto_e_entry.grid(row=3, column=1, sticky="w", pady=2)
+        self.goto_e_entry.bind('<Return>', self._on_goto_entry_commit); self.goto_e_entry.bind('<FocusOut>', self._on_goto_entry_commit)
         
-        self.go_button = ttk.Button(input_frame, text="Go", command=self._go_to_position, state=tk.DISABLED, style='Primary.TButton'); self.go_button.grid(row=3, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        self.go_button = ttk.Button(input_frame, text="Go", command=self._go_to_position, state=tk.DISABLED, style='Primary.TButton'); self.go_button.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky="ew")
 
         self.go_to_center_button = ttk.Button(input_frame, text="Go to Center", command=self._go_to_center, state=tk.DISABLED)
-        self.go_to_center_button.grid(row=4, column=0, columnspan=2, pady=(5, 0), sticky="ew")
+        self.go_to_center_button.grid(row=5, column=0, columnspan=2, pady=(5, 0), sticky="ew")
 
         # --- Visualization Canvases ---
         canvas_size = 215
@@ -622,6 +901,32 @@ class GCodeSenderGUI:
         self.z_canvas = tk.Canvas(self.canvas_frame, width=25, height=canvas_size, bg=self.COLOR_BLACK, highlightthickness=1, highlightbackground=self.COLOR_BORDER); self.z_canvas.grid(row=0, column=2, sticky="ns", padx=(2, 0))
         self.z_canvas.bind("<Button-1>", self._on_z_canvas_click); self.z_canvas.bind("<B1-Motion>", self._on_z_canvas_click); self.z_canvas.bind("<Configure>", self._draw_z_canvas_marker)
 
+        # E (Rotation) view - Circular Gauge with Snap Buttons
+        # Container for the canvas and floating buttons
+        self.e_container = ttk.Frame(self.canvas_frame, style='Panel.TFrame', width=canvas_size, height=canvas_size)
+        self.e_container.grid(row=0, column=3, sticky="n", padx=(2, 0))
+        self.e_container.grid_propagate(False) # Don't shrink
+        
+        self.e_canvas = tk.Canvas(self.e_container, width=canvas_size, height=canvas_size, bg=self.COLOR_BLACK, highlightthickness=1, highlightbackground=self.COLOR_BORDER)
+        self.e_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        self.e_canvas.bind("<Button-1>", self._on_e_canvas_click); self.e_canvas.bind("<B1-Motion>", self._on_e_canvas_click); self.e_canvas.bind("<Configure>", self._draw_e_canvas_gauge)
+
+        # Snap Buttons (N, E, S, W)
+        btn_style = 'Segment.TButton'
+        # Helper to set E target
+        def set_e(val):
+            self.target_abs_e = float(val)
+            self._update_all_displays()
+
+        # Top (0)
+        ttk.Button(self.e_container, text="0°", width=3, style=btn_style, command=lambda: set_e(0)).place(relx=0.5, rely=0.02, anchor='n')
+        # Right (90)
+        ttk.Button(self.e_container, text="90°", width=3, style=btn_style, command=lambda: set_e(90)).place(relx=0.98, rely=0.5, anchor='e')
+        # Bottom (180)
+        ttk.Button(self.e_container, text="180°", width=4, style=btn_style, command=lambda: set_e(180)).place(relx=0.5, rely=0.98, anchor='s')
+        # Left (270/-90)
+        ttk.Button(self.e_container, text="270°", width=4, style=btn_style, command=lambda: set_e(270)).place(relx=0.02, rely=0.5, anchor='w')
+
         # --- 2D Plot Toggle ---
         self.toggle_2d_button = ttk.Button(
             frame,
@@ -631,8 +936,8 @@ class GCodeSenderGUI:
         self.toggle_2d_button.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0), padx=5)
 
         # Store controls for easy enabling/disabling based on connection state.
-        self.goto_controls = [ self.goto_x_entry, self.goto_y_entry, self.goto_z_entry, self.go_button, 
-                                 self.go_to_center_button, self.xy_canvas, self.z_canvas, self.abs_button, self.rel_button ]
+        self.goto_controls = [ self.goto_x_entry, self.goto_y_entry, self.goto_z_entry, self.goto_e_entry, self.go_button, 
+                                 self.go_to_center_button, self.xy_canvas, self.z_canvas, self.e_canvas, self.abs_button, self.rel_button ]
         self._set_coord_mode("absolute") # Set initial mode and style
         self._update_2d_plot_button_style() # Set initial button style
         
@@ -641,17 +946,18 @@ class GCodeSenderGUI:
         """Creates the 'MANUAL JOG CONTROL' panel for moving the printer."""
         manual_frame = ttk.LabelFrame(parent, text="MANUAL JOG CONTROL", padding="10")
         manual_frame.pack(fill=tk.X, pady=(0, 10), padx=5)
+        # 5 columns: Spacer, Z-Axis, XY-Grid, E-Axis, Spacer
         manual_frame.columnconfigure(0, weight=1); manual_frame.columnconfigure(4, weight=1)
         
-        # Z-axis jog buttons
-        z_control_left_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
-        z_control_left_frame.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(0,20)); 
-        ttk.Label(z_control_left_frame, text="Z-AXIS", font=self.FONT_BODY_BOLD).pack(pady=(0,5))
+        # --- Z-axis jog buttons (Left Wing) ---
+        z_control_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
+        z_control_frame.grid(row=0, column=1, rowspan=3, sticky="ns", padx=(0,15)); 
+        ttk.Label(z_control_frame, text="Z-AXIS", font=self.FONT_BODY_BOLD).pack(pady=(0,5))
         
-        self.jog_z_pos = ttk.Button(z_control_left_frame, text="Z+", command=lambda: self._jog('Z', 1), state=tk.DISABLED, style='Jog.TButton'); self.jog_z_pos.pack(pady=(2, 10), fill=tk.X)
-        self.jog_z_neg = ttk.Button(z_control_left_frame, text="Z-", command=lambda: self._jog('Z', -1), state=tk.DISABLED, style='Jog.TButton'); self.jog_z_neg.pack(pady=(10, 2), fill=tk.X)
+        self.jog_z_pos = ttk.Button(z_control_frame, text="Z+", command=lambda: self._jog('Z', 1), state=tk.DISABLED, style='Jog.TButton'); self.jog_z_pos.pack(pady=(2, 10), fill=tk.X)
+        self.jog_z_neg = ttk.Button(z_control_frame, text="Z-", command=lambda: self._jog('Z', -1), state=tk.DISABLED, style='Jog.TButton'); self.jog_z_neg.pack(pady=(10, 2), fill=tk.X)
         
-        # XY-axis jog buttons and home button in a grid
+        # --- XY-axis jog buttons (Center) ---
         jog_grid_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
         jog_grid_frame.grid(row=0, column=2, rowspan=3); 
 
@@ -668,15 +974,33 @@ class GCodeSenderGUI:
         self.jog_x_pos = ttk.Button(jog_grid_frame, text="X+", style='Jog.TButton', command=lambda: self._jog('X', 1), state=tk.DISABLED); self.jog_x_pos.grid(row=1, column=2, padx=2, pady=2, sticky="nsew")
         self.jog_y_neg = ttk.Button(jog_grid_frame, text="Y-", style='Jog.TButton', command=lambda: self._jog('Y', -1), state=tk.DISABLED); self.jog_y_neg.grid(row=2, column=1, padx=2, pady=2, sticky="nsew")
         
-        # Entry fields for jog step size and speed
-        jog_params_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
-        jog_params_frame.grid(row=3, column=1, columnspan=3, pady=(10,0)); 
-        ttk.Label(jog_params_frame, text="Step Size (mm):").pack(side=tk.LEFT, padx=(0, 5)); 
-        self.jog_step_entry = ttk.Entry(jog_params_frame, textvariable=self.jog_step_var, width=6); self.jog_step_entry.pack(side=tk.LEFT, padx=(0, 15))
-        ttk.Label(jog_params_frame, text="Travel Speed (mm/min):").pack(side=tk.LEFT, padx=(0, 5));
-        self.jog_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.jog_feedrate_var, width=8); self.jog_feedrate_entry.pack(side=tk.LEFT)
+        # --- E-axis jog buttons (Right Wing) ---
+        e_control_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
+        e_control_frame.grid(row=0, column=3, rowspan=3, sticky="ns", padx=(15,0)); 
+        ttk.Label(e_control_frame, text="R-AXIS", font=self.FONT_BODY_BOLD).pack(pady=(0,5))
         
-        self.manual_buttons = [self.home_button, self.jog_x_neg, self.jog_x_pos, self.jog_y_neg, self.jog_y_pos, self.jog_z_neg, self.jog_z_pos]; self._set_manual_controls_state(tk.DISABLED)
+        self.jog_e_pos = ttk.Button(e_control_frame, text="↻", command=lambda: self._jog('E', 1), state=tk.DISABLED, style='JogIcon.TButton'); self.jog_e_pos.pack(pady=(2, 10), fill=tk.X)
+        self.jog_e_neg = ttk.Button(e_control_frame, text="↺", command=lambda: self._jog('E', -1), state=tk.DISABLED, style='JogIcon.TButton'); self.jog_e_neg.pack(pady=(10, 2), fill=tk.X)
+
+        # --- Entry fields for jog parameters ---
+        jog_params_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
+        jog_params_frame.grid(row=3, column=0, columnspan=5, pady=(10,0))
+        
+        # XYZ Params
+        ttk.Label(jog_params_frame, text="XYZ Step (mm):").pack(side=tk.LEFT, padx=(0, 5))
+        self.jog_step_entry = ttk.Entry(jog_params_frame, textvariable=self.jog_step_var, width=5); self.jog_step_entry.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(jog_params_frame, text="XYZ Speed (mm/min):").pack(side=tk.LEFT, padx=(0, 5))
+        self.jog_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.jog_feedrate_var, width=6); self.jog_feedrate_entry.pack(side=tk.LEFT, padx=(0, 20))
+
+        # E Params (Rotation)
+        ttk.Label(jog_params_frame, text="Rot Step (deg):").pack(side=tk.LEFT, padx=(0, 5))
+        self.rot_step_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_step_var, width=5); self.rot_step_entry.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(jog_params_frame, text="Rot Speed (deg/min):").pack(side=tk.LEFT, padx=(0, 5))
+        self.rot_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_feedrate_var, width=6); self.rot_feedrate_entry.pack(side=tk.LEFT)
+        
+        self.manual_buttons = [self.home_button, self.jog_x_neg, self.jog_x_pos, self.jog_y_neg, self.jog_y_pos, self.jog_z_neg, self.jog_z_pos, self.jog_e_pos, self.jog_e_neg]
+        self.manual_entries = [self.jog_step_entry, self.jog_feedrate_entry, self.rot_step_entry, self.rot_feedrate_entry]
+        self._set_manual_controls_state(tk.DISABLED)
 
     def create_log_panel(self, parent):
         """Creates the serial log display and the manual command terminal."""
@@ -852,9 +1176,9 @@ class GCodeSenderGUI:
     def _update_3d_plot_button_style(self):
         """Applies the 'On' or 'Off' style to the 3D plot toggle button."""
         if self.is_3d_plot_enabled.get():
-            self.toggle_3d_button.config(style='SciFi.Toggle.On.TButton')
+            self.toggle_3d_button.config(style='Custom.Toggle.On.TButton')
         else:
-            self.toggle_3d_button.config(style='SciFi.Toggle.Off.TButton')
+            self.toggle_3d_button.config(style='Custom.Toggle.Off.TButton')
 
     def _style_3d_plot(self):
         """Applies the custom dark theme to the 3D plot."""
@@ -926,9 +1250,13 @@ class GCodeSenderGUI:
         if len(all_points) < 3:
             # Not enough points to simplify, proceed as before
             simplified_points = all_points
+            self._simplified_indices_cache = list(range(len(all_points)))
         else:
             # --- Line Simplification using Collinearity Check ---
+            # We track the original indices to map 'completed moves' to 'simplified segments'.
             simplified_points = [all_points[0]]
+            self._simplified_indices_cache = [0]
+            
             for i in range(1, len(all_points) - 1):
                 p1 = simplified_points[-1]
                 p2 = all_points[i]
@@ -938,9 +1266,11 @@ class GCodeSenderGUI:
                 # and the next point, then it's a necessary vertex.
                 if not self._are_collinear(p1, p2, p3):
                     simplified_points.append(p2)
+                    self._simplified_indices_cache.append(i)
             
             # Always add the very last point to complete the path
             simplified_points.append(all_points[-1])
+            self._simplified_indices_cache.append(len(all_points) - 1)
             
             original_count = len(all_points)
             simplified_count = len(simplified_points)
@@ -982,19 +1312,32 @@ class GCodeSenderGUI:
             self.canvas_3d.draw()
             return
 
+        # Determine where to split the line colors based on simplification map
+        split_index = 0
+        if self.completed_move_count > 0 and hasattr(self, '_simplified_indices_cache'):
+            # Find the last simplified vertex that corresponds to a completed raw move.
+            # self.completed_move_count is the number of raw moves done.
+            # Corresponds to index in all_points.
+            for i in range(1, len(self._simplified_indices_cache)):
+                end_raw_idx = self._simplified_indices_cache[i]
+                if self.completed_move_count >= end_raw_idx:
+                    split_index = i
+                else:
+                    break
+
         # Plot completed segments in grey
-        if self.completed_move_count > 0:
-            num_completed = self.completed_move_count + 1
-            self.ax_3d.plot(x_coords[:num_completed], y_coords[:num_completed], z_coords[:num_completed], color=self.COLOR_GREY_COMPLETED, linewidth=1, alpha=0.4)
+        if split_index > 0:
+            # We include point at split_index to ensure connectivity
+            self.ax_3d.plot(x_coords[:split_index+1], y_coords[:split_index+1], z_coords[:split_index+1], color=self.COLOR_GREY_COMPLETED, linewidth=1, alpha=0.4)
 
         # Plot pending segments in cyan
-        if self.completed_move_count < len(x_coords):
-            self.ax_3d.plot(x_coords[self.completed_move_count:], y_coords[self.completed_move_count:], z_coords[self.completed_move_count:], color=self.COLOR_ACCENT_CYAN, linewidth=1.2, alpha=self.toolpath_3d_opacity_var.get())
+        if split_index < len(x_coords) - 1:
+            self.ax_3d.plot(x_coords[split_index:], y_coords[split_index:], z_coords[split_index:], color=self.COLOR_ACCENT_CYAN, linewidth=1.2, alpha=self.toolpath_3d_opacity_var.get())
 
-        # Set fixed plot limits
-        self.ax_3d.set_xlim(0, 220)
-        self.ax_3d.set_ylim(0, 220)
-        self.ax_3d.set_zlim(0, 250)
+        # Set fixed plot limits from PRINTER_BOUNDS
+        self.ax_3d.set_xlim(self.PRINTER_BOUNDS['x_min'], self.PRINTER_BOUNDS['x_max'])
+        self.ax_3d.set_ylim(self.PRINTER_BOUNDS['y_min'], self.PRINTER_BOUNDS['y_max'])
+        self.ax_3d.set_zlim(self.PRINTER_BOUNDS['z_min'], self.PRINTER_BOUNDS['z_max'])
 
         self._update_3d_position_marker()
         self.canvas_3d.draw()
@@ -1038,7 +1381,13 @@ class GCodeSenderGUI:
         self._set_view(new_elev, new_azim)
 
     def _color_blend(self, color1_hex, color2_hex, alpha):
-        """Blends two hex colors together by an alpha value."""
+        """
+        Blends two hex colors together by an alpha value.
+        
+        NOTE: This method is currently unused. It was intended for future UI enhancements
+        like blending toolpath colors based on speed or other parameters.
+        If integrated, update its usage throughout the drawing functions (e.g., _draw_xy_canvas_guides, _draw_z_canvas_marker).
+        """
         color1_rgb = tuple(int(color1_hex.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
         color2_rgb = tuple(int(color2_hex.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
         
@@ -1102,12 +1451,20 @@ class GCodeSenderGUI:
             button.config(state=state)
         
         entry_state = tk.NORMAL if state == tk.NORMAL else tk.DISABLED
-        self.jog_step_entry.config(state=entry_state)
-        self.jog_feedrate_entry.config(state=entry_state)
+        if hasattr(self, 'manual_entries'):
+            for entry in self.manual_entries:
+                entry.config(state=entry_state)
+        else:
+            # Fallback for older initialization or if attribute missing
+            self.jog_step_entry.config(state=entry_state)
+            self.jog_feedrate_entry.config(state=entry_state)
         
         # Also enable/disable the 'Mark Current as Center' button
         if hasattr(self, 'mark_center_button'):
              self.mark_center_button.config(state=state)
+        
+        if hasattr(self, 'collision_test_button'):
+             self.collision_test_button.config(state=state)
 
 
     def _set_goto_controls_state(self, state):
@@ -1228,9 +1585,35 @@ class GCodeSenderGUI:
             self.log_message(f"Selected file: {filepath}")
             self.load_gcode_file(filepath)
             
+            # Set default log filename based on G-code filename
+            base_name = os.path.splitext(filename)[0]
+            self.log_filepath_var.set(f"{base_name}_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+            
         # Enable the start button if we are connected and have a valid file.
         if self.serial_connection and self.processed_gcode:
             self.start_button.config(state=tk.NORMAL)
+
+    def _apply_e_conversion(self, command):
+        """
+        Scales 'E' values in the G-code command by the configured mm/degree ratio.
+        Used to translate logical degrees (UI/File) to physical mm (Printer).
+        """
+        try:
+            ratio = float(self.mm_per_degree_var.get())
+            if abs(ratio - 1.0) < 0.000001: return command
+            
+            # Regex to find E<number>
+            # Matches E followed by optional whitespace, optional sign, digits, optional decimal
+            def replace_e(match):
+                val = float(match.group(1))
+                new_val = val * ratio
+                return f"E{new_val:.4f}"
+            
+            import re
+            # Only match E if it's a command parameter (not a comment, though stripped lines help)
+            return re.sub(r"([Ee])\s*([-+]?\d*\.?\d+)", replace_e, command)
+        except Exception:
+            return command
 
     def load_gcode_file(self, filepath):
         """
@@ -1271,6 +1654,7 @@ class GCodeSenderGUI:
         self.ordered_z_values = []
         self.completed_move_count = 0
         self._plot_cache_valid = False # Invalidate the plot cache
+        self.rotation_crash_test_complete = False
 
         if not hasattr(self, 'gcode_filepath') or not self.gcode_filepath:
             self.start_button.config(state=tk.DISABLED)
@@ -1310,6 +1694,12 @@ class GCodeSenderGUI:
                     self.log_message(f"Warning: Blocked G92 command on line {line_number}: '{stripped_line}'", "WARN")
                     temp_processed.append(f"; Original line {line_number} blocked (G92 conflicts with app coords): {stripped_line}\n")
                     continue
+
+                # Block heating commands (M104, M109) to ensure cold extrusion safety
+                if "M104" in stripped_line.upper() or "M109" in stripped_line.upper():
+                    self.log_message(f"Warning: Blocked heating command on line {line_number}: '{stripped_line}'", "WARN")
+                    temp_processed.append(f"; Original line {line_number} blocked (Heating disabled): {stripped_line}\n")
+                    continue
                 
                 # Check if the line is a move command that we need to process for the toolpath
                 is_move = "G0" in stripped_line.upper() or "G1" in stripped_line.upper() or "G28" in stripped_line.upper()
@@ -1341,9 +1731,9 @@ class GCodeSenderGUI:
                         rel_y = parsed_coords.get('y')
                         rel_z = parsed_coords.get('z')
                         
-                        abs_x = rel_x + center_x if rel_x is not None else current_pos.get('x')
-                        abs_y = rel_y + center_y if rel_y is not None else current_pos.get('y')
-                        abs_z = rel_z + center_z if rel_z is not None else current_pos.get('z')
+                        abs_x = current_pos.get('x') if rel_x is None else float(rel_x) + center_x
+                        abs_y = current_pos.get('y') if rel_y is None else float(rel_y) + center_y
+                        abs_z = current_pos.get('z') if rel_z is None else float(rel_z) + center_z
 
                         # On the very first move, the start position might be unknown.
                         # We establish the position but cannot draw a path segment yet.
@@ -1413,8 +1803,14 @@ class GCodeSenderGUI:
         self.processed_gcode = temp_processed
         self.log_message(f"G-code processed. {lines_translated} moves translated. Toolpath data generated for {len(self.toolpath_by_layer)} layers.", "SUCCESS")
         
+        # Check for rotation components to determine if collision test is mandatory
+        has_rotation = any('E' in line.upper() for line in self.processed_gcode if not line.strip().startswith(';'))
+        if not has_rotation:
+            self.rotation_crash_test_complete = True
+            self.log_message("No rotation detected in G-code. Collision test marked as complete.")
+        
         if self.serial_connection:
-             self.start_button.config(state=tk.NORMAL)
+            self.start_button.config(state=tk.NORMAL)
         
         self._update_all_displays() # Redraw canvas with new path
         self._draw_3d_toolpath() # Draw the new 3D toolpath
@@ -1545,7 +1941,30 @@ class GCodeSenderGUI:
                 finally:
                     if temp_ser and temp_ser.is_open and serial_conn != temp_ser: temp_ser.close()
             if connection_cancelled: self.message_queue.put(("CONNECT_CANCELLED", None))
-            elif serial_conn and found_port: self.message_queue.put(("CONNECTED", (serial_conn, found_port, baudrate)))
+            elif serial_conn and found_port: 
+                # Send M302 P1 S0 to explicitly allow cold extrusion regardless of temp
+                self.queue_message("Sending M302 P1 S0 (Allow Cold Extrusion)...")
+                try:
+                    serial_conn.write(b'M302 P1 S0\n')
+                    serial_conn.flush()
+                    m302_ok = False
+                    m302_start_time = time.time()
+                    m302_response_buffer = ""
+                    while time.time() - m302_start_time < 5.0: # Short timeout for M302
+                        if serial_conn.in_waiting > 0:
+                            m302_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore') # type: ignore
+                            if 'ok' in m302_response_buffer.lower():
+                                m302_ok = True
+                                break
+                        time.sleep(0.05)
+                    if not m302_ok:
+                        self.queue_message("Warning: M302 P1 S0 'ok' not received. Cold extrusion might still be enabled.", "WARN")
+                    else:
+                        self.queue_message("M302 P1 S0 confirmed.", "SUCCESS")
+                except Exception as e:
+                    self.queue_message(f"Error sending M302 P1 S0: {e}", "ERROR")
+
+                self.message_queue.put(("CONNECTED", (serial_conn, found_port, baudrate)))
             else:
                 if not self.cancel_connect_event.is_set(): self.message_queue.put(("CONNECT_FAIL", "No responsive printer found."))
                 else: self.message_queue.put(("CONNECT_CANCELLED", None))
@@ -1627,6 +2046,14 @@ class GCodeSenderGUI:
         if not self.processed_gcode:
             messagebox.showerror("Error", "No valid G-code to send. Check file, center coordinates, and printer bounds.")
             return
+
+        # --- Crash Avoidance Check ---
+        if not self.rotation_crash_test_complete:
+            ans = messagebox.askyesno("Safety Check", 
+                                      "The Rotation Collision Avoidance Test has not been completed for this profile.\n\n"
+                                      "Are you sure you want to proceed with the scan?")
+            if not ans:
+                return
             
         if self.is_sending or self.is_manual_command_running:
             messagebox.showwarning("Warning", "Printer is already busy with another operation.")
@@ -1723,6 +2150,9 @@ class GCodeSenderGUI:
         
         self.log_message("!!! EMERGENCY STOP triggered !!!", "CRITICAL")
         
+        # Invalidate collision test status if we had to stop motion
+        self.rotation_crash_test_complete = False
+        
         # Un-pause and then stop all running threads.
         self.pause_event.set()
         self.stop_event.set()
@@ -1768,6 +2198,9 @@ class GCodeSenderGUI:
         
         self.log_message("Quick Stop requested.", "WARN")
         
+        # Invalidate collision test status if we had to stop motion
+        self.rotation_crash_test_complete = False
+
         # Un-pause and then stop all running threads.
         self.pause_event.set()
         self.stop_event.set()
@@ -1834,16 +2267,133 @@ class GCodeSenderGUI:
 
 
     # --- Thread Workers ---
-    def _parse_gcode_coords(self, gcode_line):
-        """Extracts X, Y, Z coordinates from a G0/G1/G92 command line."""
-        coords = {}
-        match = re.search(r"^[Gg](?:[01]|92)\s+(?:[Xx]([-+]?\d*\.?\d+)\s*)?(?:[Yy]([-+]?\d*\.?\d+)\s*)?(?:[Zz]([-+]?\d*\.?\d+)\s*)?", gcode_line)
-        if match:
-            x, y, z = match.groups()
-            if x is not None: coords['x'] = float(x)
-            if y is not None: coords['y'] = float(y)
-            if z is not None: coords['z'] = float(z)
+    def _parse_gcode_coords(self, gcode_line: str) -> Dict[str, float]:
+        """Extracts X, Y, Z, and E coordinates from a G0/G1/G92 command line."""
+        coords: Dict[str, float] = {}
+        # Regex to capture X, Y, Z, and E (case insensitive)
+        # Group 1: X value, Group 2: Y value, Group 3: Z value, Group 4: E value
+        match = re.search(r"^[Gg](?:[01]|92).*?(?:[Xx]([-+]?\d*\.?\d+))?.*?(?:[Yy]([-+]?\d*\.?\d+))?.*?(?:[Zz]([-+]?\d*\.?\d+))?.*?(?:[Ee]([-+]?\d*\.?\d+))?", gcode_line)
+        
+        # Note: The above regex is position dependent if not careful. 
+        # A safer way is to find all matches or separate searches.
+        # Let's use individual searches for robustness against parameter order (e.g. G1 E10 X5).
+        
+        x_match = re.search(r"[Xx]([-+]?\d*\.?\d+)", gcode_line)
+        if x_match: coords['x'] = float(x_match.group(1))
+        
+        y_match = re.search(r"[Yy]([-+]?\d*\.?\d+)", gcode_line)
+        if y_match: coords['y'] = float(y_match.group(1))
+        
+        z_match = re.search(r"[Zz]([-+]?\d*\.?\d+)", gcode_line)
+        if z_match: coords['z'] = float(z_match.group(1))
+        
+        e_match = re.search(r"[Ee]([-+]?\d*\.?\d+)", gcode_line)
+        if e_match: coords['e'] = float(e_match.group(1))
+            
         return coords
+
+
+    def _parse_m119_response(self, response_text):
+        """
+        Parses the output of M119 (Endstop States).
+        Returns a dict: {'x_min': 'open'/'triggered', ...}
+        """
+        states = {}
+        lines = response_text.splitlines()
+        for line in lines:
+            if ':' in line:
+                key, val = line.split(':', 1)
+                states[key.strip().lower()] = val.strip().lower()
+        return states
+
+    def _homing_verification_routine(self):
+        """
+        Executes a multi-phase verification to detect X/Y drift before re-homing.
+        Must be called from a background thread (sender or manual).
+        Raises InterruptedError if verification fails or stop is requested.
+        """
+        self.queue_message("Starting Homing Verification...", "INFO")
+        
+        def send_and_wait_m119():
+            self.serial_connection.write(b'M119\n')
+            buffer = ""
+            start = time.time()
+            while time.time() - start < 5.0:
+                if self.stop_event.is_set(): raise InterruptedError("Stop")
+                if self.serial_connection.in_waiting > 0:
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore') # type: ignore
+                    if 'ok' in buffer.lower():
+                        return self._parse_m119_response(buffer)
+                time.sleep(0.05)
+            raise TimeoutError("M119 timeout")
+
+        def send_move_and_wait(cmd):
+            self.serial_connection.write(cmd.encode('utf-8') + b'\n')
+            buffer = ""
+            start = time.time()
+            # Homing can take longer, but G1 moves should be within 30s
+            timeout = 90.0 if "G28" in cmd.upper() else 30.0
+            while time.time() - start < timeout:
+                if self.stop_event.is_set(): raise InterruptedError("Stop")
+                if self.serial_connection.in_waiting > 0:
+                    buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore') # type: ignore
+                    if 'ok' in buffer.lower():
+                        return
+                time.sleep(0.05)
+            raise TimeoutError(f"Command timeout: {cmd}")
+
+        try:
+            # 0. Wait for all previous moves to finish
+            send_move_and_wait("M400")
+            
+            # 1. Phase A: Move to Safe Zone (0.5, 0.5)
+            # This detects "Negative Drift" (printer thinks it's further from switch than it is)
+            self.queue_message("Verification Phase A: Moving to Safe Zone (0.5, 0.5)...")
+            send_move_and_wait("G1 X0.5 Y0.5 F3000")
+            send_move_and_wait("M400")
+            states = send_and_wait_m119()
+            
+            if states.get('x_min') == 'triggered' or states.get('y_min') == 'triggered':
+                axis = 'X' if states.get('x_min') == 'triggered' else 'Y'
+                diag = f"CRITICAL ERROR: {axis}-axis triggered early at Safe Zone (0.5mm). Negative drift/skipped steps detected."
+                self._handle_homing_failure(diag)
+                return
+
+            # 2. Phase B: Move to Home Target (0, 0)
+            # This detects "Positive Drift" (printer thinks it's at switch but it's not)
+            self.queue_message("Verification Phase B: Moving to Home Target (0, 0)...")
+            send_move_and_wait("G1 X0 Y0 F500") 
+            send_move_and_wait("M400")
+            states = send_and_wait_m119()
+            
+            if states.get('x_min') == 'open' or states.get('y_min') == 'open':
+                axis = 'X' if states.get('x_min') == 'open' else 'Y'
+                diag = f"CRITICAL ERROR: {axis}-axis failed to trigger at Home Target (0.0mm). Positive drift/skipped steps detected."
+                self._handle_homing_failure(diag)
+                return
+
+            # 3. Phase C: Actual Re-Home to sync coordinate system
+            self.queue_message("Verification Passed. Performing Sync Home (G28 X Y)...", "SUCCESS")
+            send_move_and_wait("G28 X Y")
+            self.queue_message("Sync Home Complete. Resuming scan.")
+
+        except Exception as e:
+            if isinstance(e, InterruptedError): raise
+            diag = f"Verification Aborted: {str(e)}"
+            self._handle_homing_failure(diag)
+
+    def _handle_homing_failure(self, diagnosis):
+        """Helper to halt motion and notify GUI on verification failure."""
+        self.queue_message(diagnosis, "CRITICAL")
+        if self.serial_connection:
+            try: 
+                self.serial_connection.write(b'M410\n') # Quick Stop
+                self.serial_connection.flush()
+            except: pass
+        
+        self.stop_event.set()
+        self.message_queue.put(("HOMING_FAILURE", diagnosis))
+        raise InterruptedError(diagnosis)
 
 
     def _send_manual_command_thread(self, command):
@@ -1891,6 +2441,7 @@ class GCodeSenderGUI:
                             if 'x' in parsed: current_target['x'] = parsed.get('x')
                             if 'y' in parsed: current_target['y'] = parsed.get('y')
                             if 'z' in parsed: current_target['z'] = parsed.get('z')
+                            if 'e' in parsed: current_target['e'] = parsed.get('e')
                         # Note: Relative (G91) jogging is handled by the _jog method which sends absolute commands.
                 elif "G28" in line.upper(): # Homing command
                     if 'X' not in line.upper() and 'Y' not in line.upper() and 'Z' not in line.upper():
@@ -1901,8 +2452,15 @@ class GCodeSenderGUI:
                         if 'Z' in line.upper(): current_target['z'] = self.PRINTER_BOUNDS['z_min']
                 
                 # --- Send the line and wait for 'ok' ---
-                self.serial_connection.write(line.encode('utf-8') + b'\n')
-                self.queue_message(f"Sent: {line}")
+                line_to_send = self._apply_e_conversion(line)
+                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
+                
+                # Log modification if it happened
+                if line != line_to_send:
+                     self.queue_message(f"Sent: {line_to_send} (Orig: {line})")
+                else:
+                     self.queue_message(f"Sent: {line}")
+                     
                 ok_received = False
                 response_buffer = ""
                 timeout = 90.0 if "G28" in line.upper() else 20.0 # Homing can take a long time
@@ -2029,60 +2587,269 @@ class GCodeSenderGUI:
         move command to the printer.
 
         Args:
-            axis (str): The axis to move ('X', 'Y', or 'Z').
+            axis (str): The axis to move ('X', 'Y', 'Z', or 'E').
             direction (int): The direction to move (-1 or 1).
         """
         try:
-            step = float(self.jog_step_var.get())
-            feedrate = float(self.jog_feedrate_var.get())
+            if axis == 'E':
+                step = float(self.rotation_step_var.get())
+                feedrate = float(self.rotation_feedrate_var.get())
+            else:
+                step = float(self.jog_step_var.get())
+                feedrate = float(self.jog_feedrate_var.get())
         except ValueError:
-            messagebox.showerror("Error", "Invalid jog step or feedrate. Must be numbers.")
+            messagebox.showerror("Error", "Invalid step or feedrate. Must be numbers.")
             return
             
         if step <= 0 or feedrate <= 0:
-            messagebox.showerror("Error", "Jog step and feedrate must be positive.")
+            messagebox.showerror("Error", "Step and feedrate must be positive.")
             return
             
         try:
-            # Jogging is always relative to the last *commanded* position (the red marker).
+            # Jogging is always relative to the last *commanded* position.
             current_x = self.last_cmd_abs_x if self.last_cmd_abs_x is not None else self.PRINTER_BOUNDS['x_min']
             current_y = self.last_cmd_abs_y if self.last_cmd_abs_y is not None else self.PRINTER_BOUNDS['y_min']
             current_z = self.last_cmd_abs_z if self.last_cmd_abs_z is not None else self.PRINTER_BOUNDS['z_min']
+            current_e = self.last_cmd_abs_e if self.last_cmd_abs_e is not None else 0.0
             
-            new_x, new_y, new_z = current_x, current_y, current_z
+            new_x, new_y, new_z, new_e = current_x, current_y, current_z, current_e
+            
             if axis == 'X': new_x += direction * step
             elif axis == 'Y': new_y += direction * step
             elif axis == 'Z': new_z += direction * step
+            elif axis == 'E': new_e += direction * step
             
             # Clamp the new target position to within the printer's physical bounds.
             new_x = max(self.PRINTER_BOUNDS['x_min'], min(self.PRINTER_BOUNDS['x_max'], new_x))
             new_y = max(self.PRINTER_BOUNDS['y_min'], min(self.PRINTER_BOUNDS['y_max'], new_y))
             new_z = max(self.PRINTER_BOUNDS['z_min'], min(self.PRINTER_BOUNDS['z_max'], new_z))
+            new_e = max(self.PRINTER_BOUNDS['e_min'], min(self.PRINTER_BOUNDS['e_max'], new_e))
             
             # Update the internal 'target' model (the blue marker).
             self.target_abs_x = new_x
             self.target_abs_y = new_y
             self.target_abs_z = new_z
+            self.target_abs_e = new_e
             self._update_all_displays() # Update GUI fields and canvas markers.
             
             # Send the jog move as an absolute G90 command.
-            self._send_manual_command(f"G90\nG1 X{new_x:.3f} Y{new_y:.3f} Z{new_z:.3f} F{feedrate:.0f}")
+            command = f"G90\nG1 X{new_x:.3f} Y{new_y:.3f} Z{new_z:.3f} E{new_e:.3f} F{feedrate:.0f}"
+            self._send_manual_command(command)
 
         except ValueError as e:
              self.log_message(f"Could not parse current position for jog: {e}", "WARN")
 
     def _home_all(self):
-        """Sends a G28 homing command to the printer."""
-        # The _send_manual_command will handle sending G28.
-        # The printer's response will trigger a POSITION_UPDATE message,
-        # which will automatically set the last_cmd position to the origin.
-        self._send_manual_command("G28")
+        """
+        Starts the automated homing sequence:
+        1. G28 (Standard Home)
+        2. Z-Max Probing (Calibrate Max Height)
+        """
+        if not self.serial_connection:
+            messagebox.showerror("Error", "Not connected.")
+            return
+
+        if self.is_sending or self.is_manual_command_running:
+            messagebox.showwarning("Busy", "Printer is busy.")
+            return
+
+        # Disable controls during the sequence
+        self.is_manual_command_running = True
+        self._set_manual_controls_state(tk.DISABLED)
+        self._set_goto_controls_state(tk.DISABLED)
+        self.start_button.config(state=tk.DISABLED)
         
-        # Also reset the 'target' (blue marker) to the origin.
-        self.target_abs_x = self.PRINTER_BOUNDS['x_min']
-        self.target_abs_y = self.PRINTER_BOUNDS['y_min']
-        self.target_abs_z = self.PRINTER_BOUNDS['z_min']
-        self._update_all_displays()
+        self.log_message("Starting Auto-Homing & Calibration...", "INFO")
+        threading.Thread(target=self._homing_sequence_worker, daemon=True).start()
+
+    def _homing_sequence_worker(self):
+        """
+        Background thread for the full homing + calibration sequence.
+        1. G28 (Home Z-Min to 0)
+        2. Step-and-Check probe to find Z-Max
+        3. Update PRINTER_BOUNDS['z_max']
+        """
+        self.is_calibrating = True
+        try:
+            self.message_queue.put(("SET_STATUS", "busy"))
+            
+            # --- Step 1: Standard G28 Homing ---
+            self.queue_message("Homing (G28)...")
+            if self.serial_connection:
+                self.serial_connection.reset_input_buffer()
+                self.serial_connection.write(b'G28\n')
+            else:
+                raise Exception("Serial connection lost.")
+            
+            # Wait for 'ok' (G28 can take time)
+            if not self._wait_for_ok(timeout=120):
+                raise Exception("G28 Homing timeout.")
+            
+            # Update internal position to Origin
+            self.message_queue.put(("POSITION_UPDATE", {'x': 0.0, 'y': 0.0, 'z': 0.0, 'e': 0.0}))
+            
+            # --- Step 2: Z-Max Probing (Step-and-Check) ---
+            if not HAS_GPIO: 
+                # If no GPIO, we can't probe. Set a safe default?
+                # For now, just warn and keep the default.
+                self.queue_message("No GPIO detected. Z-Max calibration skipped.", "WARN")
+                self.message_queue.put(("SET_STATUS", "on"))
+                return
+
+            self.queue_message("Calibrating Z-Max (Step-and-Check)...")
+            
+            # Disable Safety Interrupt during intentional probing
+            try:
+                GPIO.remove_event_detect(Z_MAX_LIMIT_PIN)
+            except Exception:
+                pass
+            
+            try:
+                # Switch to Relative Mode
+                self.serial_connection.write(b'G91\n')
+                self._wait_for_ok()
+
+                z_limit_hit = False
+                
+                # --- Phase A: Coarse Seek (1mm steps) ---
+                # Max travel: 300mm (safety limit)
+                for _ in range(300):
+                    if self.stop_event.is_set(): raise InterruptedError("Stopped")
+                    
+                    # Check switch BEFORE move
+                    if GPIO.input(Z_MAX_LIMIT_PIN) == 0:
+                        z_limit_hit = True
+                        # STOP IMMEDIATELY to kill buffered moves
+                        self.serial_connection.write(b'M410\n')
+                        time.sleep(0.2)
+                        self.serial_connection.reset_input_buffer()
+                        break
+                    
+                    # Move 1mm up
+                    self.serial_connection.write(b'G1 Z1 F600\n') 
+                    self._wait_for_ok()
+                    
+                    # Sync: Wait for move to physically finish
+                    self.serial_connection.write(b'M400\n')
+                    self._wait_for_ok()
+                
+                if not z_limit_hit:
+                    # One last check
+                    if GPIO.input(Z_MAX_LIMIT_PIN) == 0: 
+                        z_limit_hit = True
+                        self.serial_connection.write(b'M410\n') # Stop if hit at end
+                        time.sleep(0.1)
+                        self.serial_connection.reset_input_buffer()
+
+                if not z_limit_hit:
+                    # Failed to find top
+                    self.serial_connection.write(b'G90\n') # Safety restore
+                    raise Exception("Z-Max switch not found within 300mm.")
+                
+                # --- Phase B: Back-off ---
+                self.queue_message("Switch hit. Backing off...")
+                self.serial_connection.write(b'G1 Z-5 F600\n')
+                self._wait_for_ok()
+                time.sleep(0.5)
+
+                # --- Phase C: Fine Seek (0.1mm steps) ---
+                z_limit_hit = False
+                for _ in range(60): # 6mm range
+                    if self.stop_event.is_set(): raise InterruptedError("Stopped")
+                    
+                    if GPIO.input(Z_MAX_LIMIT_PIN) == 0:
+                        z_limit_hit = True
+                        # STOP IMMEDIATELY
+                        self.serial_connection.write(b'M410\n')
+                        time.sleep(0.1)
+                        self.serial_connection.reset_input_buffer()
+                        break
+                        
+                    self.serial_connection.write(b'G1 Z0.1 F60\n')
+                    self._wait_for_ok()
+                    
+                    # Sync: Wait for move to physically finish
+                    self.serial_connection.write(b'M400\n')
+                    self._wait_for_ok()
+                
+                if not z_limit_hit:
+                     # Check one last time
+                    if GPIO.input(Z_MAX_LIMIT_PIN) == 0: 
+                        z_limit_hit = True
+                        self.serial_connection.write(b'M410\n')
+                        time.sleep(0.1)
+                        self.serial_connection.reset_input_buffer()
+                
+                if not z_limit_hit:
+                     self.serial_connection.write(b'G90\n')
+                     raise Exception("Z-Max fine seek failed.")
+
+                # --- Step 3: Read Position & Update Bounds ---
+                self.queue_message("Reading Z-Max position...")
+                
+                # Back to Absolute Mode to read correct position
+                self.serial_connection.write(b'G90\n')
+                self._wait_for_ok()
+                
+                # Send M114
+                self.serial_connection.reset_input_buffer()
+                self.serial_connection.write(b'M114\n')
+                
+                measured_z = None
+                read_start = time.time()
+                while time.time() - read_start < 5.0:
+                    if self.serial_connection.in_waiting > 0:
+                        line = self.serial_connection.readline().decode('utf-8', errors='ignore').strip()
+                        if "Z:" in line:
+                            # Parse Z value
+                            import re as local_re
+                            match = local_re.search(r"Z:?\s*([-+]?\d*\.?\d+)", line)
+                            if match:
+                                measured_z = float(match.group(1))
+                                break
+                    time.sleep(0.05)
+                
+                if measured_z is not None:
+                    # Add safety margin (e.g., 1mm)
+                    safe_z_max = max(0.0, measured_z - 1.0)
+                    
+                    # Back off to safe Z
+                    self.serial_connection.write(f"G1 Z{safe_z_max:.2f} F1000\n".encode('utf-8'))
+                    self._wait_for_ok()
+                    
+                    self.message_queue.put(("CALIBRATION_COMPLETE", safe_z_max))
+                else:
+                    raise Exception("Failed to read Z position from M114.")
+            
+            finally:
+                # Re-enable Safety Interrupt
+                try:
+                    GPIO.add_event_detect(Z_MAX_LIMIT_PIN, GPIO.FALLING, callback=self._on_z_max_trigger, bouncetime=200)
+                except Exception:
+                    pass
+
+        except Exception as exc:
+            self.queue_message(f"Homing Error: {exc}", "ERROR")
+            self.message_queue.put(("CALIBRATION_FAILED", str(exc)))
+            
+            # Attempt to restore G90 in case of error
+            if self.serial_connection:
+                try: self.serial_connection.write(b'G90\n')
+                except: pass
+        finally:
+            self.is_calibrating = False
+
+    def _wait_for_ok(self, timeout=10.0):
+        """Helper to block until 'ok' is received."""
+        start = time.time()
+        buffer = ""
+        while time.time() - start < timeout:
+             if self.stop_event.is_set(): return False
+             if self.serial_connection.in_waiting > 0:
+                 buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                 if 'ok' in buffer.lower(): return True
+             time.sleep(0.05)
+        return False
 
 
     def _go_to_position(self):
@@ -2102,13 +2869,18 @@ class GCodeSenderGUI:
             
         try:
             # Read the target position from the internal model variables.
-            x, y, z = self.target_abs_x, self.target_abs_y, self.target_abs_z
+            x, y, z, e_val = self.target_abs_x, self.target_abs_y, self.target_abs_z, self.target_abs_e
+            
+            # Determine feedrate. If E is moving significantly but XYZ are not, use rotation feedrate?
+            # Simplest strategy: Use jog feedrate for XYZ moves, Rotation feedrate for pure E moves?
+            # For combined moves, the printer limits by the slowest axis anyway. Let's use the Jog Feedrate as primary.
             feedrate = float(self.jog_feedrate_var.get())
             
             # Safety check against invalid values, though this should be prevented by other logic.
             if not (self.PRINTER_BOUNDS['x_min'] <= x <= self.PRINTER_BOUNDS['x_max']): raise ValueError(f"X ({x:.2f}) is out of bounds")
             if not (self.PRINTER_BOUNDS['y_min'] <= y <= self.PRINTER_BOUNDS['y_max']): raise ValueError(f"Y ({y:.2f}) is out of bounds")
             if not (self.PRINTER_BOUNDS['z_min'] <= z <= self.PRINTER_BOUNDS['z_max']): raise ValueError(f"Z ({z:.2f}) is out of bounds")
+            if not (self.PRINTER_BOUNDS['e_min'] <= e_val <= self.PRINTER_BOUNDS['e_max']): raise ValueError(f"E ({e_val:.2f}) is out of bounds")
             if feedrate <= 0: raise ValueError("Feedrate must be a positive number")
                  
         except ValueError as e:
@@ -2116,7 +2888,7 @@ class GCodeSenderGUI:
             messagebox.showerror("Invalid Input", f"Cannot execute 'Go To' command:\n{e}")
             return
             
-        command = f"G90\nG1 X{x:.3f} Y{y:.3f} Z{z:.3f} F{feedrate:.0f}"
+        command = f"G90\nG1 X{x:.3f} Y{y:.3f} Z{z:.3f} E{e_val:.3f} F{feedrate:.0f}"
         self._send_manual_command(command)
 
     def _go_to_center(self):
@@ -2161,10 +2933,8 @@ class GCodeSenderGUI:
     def _on_xy_canvas_click(self, event):
         """
         Handles clicks and drags on the XY canvas to set the Target X/Y position.
-
-        It translates the canvas pixel coordinates back into the printer's
-        world coordinates and updates the internal 'target' position model.
         """
+        # pylint: disable=unused-argument
         if self.go_button['state'] == tk.DISABLED:
             return
             
@@ -2195,6 +2965,7 @@ class GCodeSenderGUI:
 
     def _draw_xy_canvas_guides(self, event=None):
         """Draws the toolpath for the CURRENT Z-LEVEL ONLY, plus grid, origin, and markers."""
+        # pylint: disable=unused-argument
         # Only delete tagged items, not the persistent background
         self.xy_canvas.delete("toolpath", "guides", "marker_blue", "marker_red", "crosshair")
         bounds = self.PRINTER_BOUNDS
@@ -2227,9 +2998,9 @@ class GCodeSenderGUI:
 
         # --- Draw Center Crosshair ---
         try:
-            center_x = float(self.center_x_var.get())
-            center_y = float(self.center_y_var.get())
-            center_cx, center_cy = world_to_canvas(center_x, center_y)
+            c_x = float(self.center_x_var.get())
+            c_y = float(self.center_y_var.get())
+            center_cx, center_cy = world_to_canvas(c_x, c_y)
             
             # Dotted purple crosshair
             crosshair_color = "purple"
@@ -2247,7 +3018,7 @@ class GCodeSenderGUI:
                 if self.ordered_z_values:
                     current_z = self.ordered_z_values[0]
                 else:
-                    current_z = 0 # Absolute fallback
+                    current_z = 0.0 # Absolute fallback
 
             # Get the path segments for this layer
             segments_for_current_layer = self.toolpath_by_layer.get(current_z, [])
@@ -2273,13 +3044,13 @@ class GCodeSenderGUI:
                         completed_on_this_layer = self.completed_move_count - first_move_idx_on_layer
             
             # Now, draw the segments for the current layer with the correct colors
-            for i, (start_point, end_point) in enumerate(segments_for_current_layer):
+            for idx, (start_point, end_point) in enumerate(segments_for_current_layer):
                 if start_point is None or end_point is None: continue
                 
                 start_cx, start_cy = world_to_canvas(start_point[0], start_point[1])
                 end_cx, end_cy = world_to_canvas(end_point[0], end_point[1])
                 
-                path_color = self.COLOR_GREY_COMPLETED if i < completed_on_this_layer else self.COLOR_ACCENT_CYAN
+                path_color = self.COLOR_GREY_COMPLETED if idx < completed_on_this_layer else self.COLOR_ACCENT_CYAN
                 
                 self.xy_canvas.create_line(start_cx, start_cy, end_cx, end_cy, 
                                            fill=path_color, width=1, tags="toolpath")
@@ -2308,10 +3079,8 @@ class GCodeSenderGUI:
     def _on_z_canvas_click(self, event):
         """
         Handles clicks and drags on the Z canvas to set the Target Z position.
-
-        It translates the canvas pixel coordinates back into the printer's
-        world Z coordinate and updates the internal 'target' position model.
         """
+        # pylint: disable=unused-argument
         if self.go_button['state'] == tk.DISABLED:
             return
             
@@ -2334,6 +3103,7 @@ class GCodeSenderGUI:
 
     def _draw_z_canvas_marker(self, event=None):
          """Draws the Z-axis toolpath graph and position markers."""
+         # pylint: disable=unused-argument
          self.z_canvas.delete("all")
          bounds = self.PRINTER_BOUNDS; canvas_w = self.z_canvas.winfo_width(); canvas_h = self.z_canvas.winfo_height()
          if canvas_h <= 1: return
@@ -2364,6 +3134,12 @@ class GCodeSenderGUI:
                 path_color = self.COLOR_GREY_COMPLETED if i < self.completed_move_count else self.COLOR_ACCENT_CYAN
                 
                 self.z_canvas.create_line(start_x, start_y, end_x, end_y, fill=path_color, width=1, tags="z_toolpath")
+         
+         # --- Draw Scale Labels ---
+         # Max Z Label at top
+         self.z_canvas.create_text(canvas_w/2, 10, text=f"{bounds['z_max']:.0f}", fill=self.COLOR_TEXT_SECONDARY, font=("Inter", 8), tags="labels")
+         # Min Z Label at bottom
+         self.z_canvas.create_text(canvas_w/2, canvas_h - 10, text="0", fill=self.COLOR_TEXT_SECONDARY, font=("Inter", 8), tags="labels")
 
          # --- Draw Blue Marker (Go To Target) ---
          try:
@@ -2380,6 +3156,91 @@ class GCodeSenderGUI:
                   self.z_canvas.create_line(1, canvas_y, canvas_w - 1, canvas_y, fill=self.COLOR_ACCENT_RED, width=2, dash=(4, 2), tags="marker_red")
               else: pass
          except Exception: pass
+
+    def _on_e_canvas_click(self, event):
+        """Sets the E (Rotation) target based on click angle."""
+        # pylint: disable=unused-argument
+        if self.go_button['state'] == tk.DISABLED: return
+        w = self.e_canvas.winfo_width()
+        h = self.e_canvas.winfo_height()
+        if w <= 1 or h <= 1: return
+        
+        cx, cy = w / 2, h / 2
+        dx, dy = event.x - cx, event.y - cy
+        
+        # Calculate angle in degrees (0 is East/Right, 90 is South/Down)
+        # We want 0 at North/Up, clockwise.
+        # math.atan2(y, x) returns radians. East=0, South=PI/2, West=PI, North=-PI/2
+        import math
+        angle_rad = math.atan2(dy, dx)
+        angle_deg = math.degrees(angle_rad)
+        
+        # Transform to 0=Up, Clockwise
+        # Standard: East=0, CW=+
+        # Target: Up=0, CW=+
+        # Relation: Target = Standard + 90
+        mapped_angle = angle_deg + 90
+        
+        # Normalize to 0-360
+        if mapped_angle < 0: mapped_angle += 360
+        if mapped_angle >= 360: mapped_angle -= 360
+        
+        # Snap to nearest 5 degrees for cleaner UI interaction
+        mapped_angle = round(mapped_angle / 5) * 5
+        
+        self.target_abs_e = mapped_angle
+        self._update_all_displays()
+
+    def _draw_e_canvas_gauge(self, event=None):
+        """Draws the circular gauge for the E-axis."""
+        # pylint: disable=unused-argument
+        self.e_canvas.delete("all")
+        w = self.e_canvas.winfo_width()
+        h = self.e_canvas.winfo_height()
+        if w <= 1 or h <= 1: return
+        
+        cx, cy = w / 2, h / 2
+        radius = min(w, h) / 2 - 10
+        
+        # Background Circle
+        self.e_canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, outline=self.COLOR_BORDER, width=2)
+        
+        import math
+        
+        # Ticks
+        for i in range(0, 360, 45):
+            rad = math.radians(i - 90) # 0 is up
+            r_in = radius - 8 if i % 90 == 0 else radius - 5
+            x1 = cx + radius * math.cos(rad)
+            y1 = cy + radius * math.sin(rad)
+            x2 = cx + r_in * math.cos(rad)
+            y2 = cy + r_in * math.sin(rad)
+            color = self.COLOR_ACCENT_CYAN if i % 90 == 0 else self.COLOR_TEXT_SECONDARY
+            self.e_canvas.create_line(x1, y1, x2, y2, fill=color, width=2 if i % 90 == 0 else 1)
+
+        # Helper to draw a needle/marker
+        def draw_needle(angle_deg, color, length_pct, width, tag):
+            rad_n = math.radians(angle_deg - 90)
+            nx = cx + (radius * length_pct) * math.cos(rad_n)
+            ny = cy + (radius * length_pct) * math.sin(rad_n)
+            self.e_canvas.create_line(cx, cy, nx, ny, fill=color, width=width, capstyle=tk.ROUND, tags=tag)
+            # Small circle at tip
+            r_tip = 3
+            self.e_canvas.create_oval(nx - r_tip, ny - r_tip, nx + r_tip, ny + r_tip, fill=color, outline=color, tags=tag)
+
+        # Target Needle (Blue)
+        draw_needle(self.target_abs_e, self.COLOR_ACCENT_CYAN, 0.9, 3, "marker_blue")
+        
+        # Current Position Marker (Red)
+        # Since E is multi-turn (can be > 360), we modulate it for the display
+        if self.last_cmd_abs_e is not None:
+            current_angle = self.last_cmd_abs_e % 360
+            draw_needle(current_angle, self.COLOR_ACCENT_RED, 0.7, 2, "marker_red")
+            
+        # Center Cap
+        self.e_canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=self.COLOR_PANEL_BG, outline=self.COLOR_BORDER)
+
+
 
 
     # --- G-Code Sending Thread ---
@@ -2403,10 +3264,16 @@ class GCodeSenderGUI:
         moves_sent_in_thread = 0
         
         # Initialize the position tracker for this thread.
-        last_pos = {'x': self.last_cmd_abs_x, 'y': self.last_cmd_abs_y, 'z': self.last_cmd_abs_z}
+        last_pos = {
+            'x': self.last_cmd_abs_x, 
+            'y': self.last_cmd_abs_y, 
+            'z': self.last_cmd_abs_z,
+            'e': self.last_cmd_abs_e
+        }
         if last_pos['x'] is None: last_pos['x'] = self.PRINTER_BOUNDS['x_min']
         if last_pos['y'] is None: last_pos['y'] = self.PRINTER_BOUNDS['y_min']
         if last_pos['z'] is None: last_pos['z'] = self.PRINTER_BOUNDS['z_min']
+        if last_pos['e'] is None: last_pos['e'] = 0.0
         
         # A brief delay to allow the user to see the "Starting..." message.
         self.queue_message("Waiting 5s before start...")
@@ -2441,19 +3308,43 @@ class GCodeSenderGUI:
                 if parsed:
                     target_pos_for_line = last_pos.copy() 
                     target_pos_for_line.update(parsed) # The processed G-code is already absolute.
+
+                    # --- Homing Verification Logic ---
+                    # Detect if this move command changes the Z layer.
+                    # If it does, we rehome before executing this command.
+                    if target_pos_for_line['z'] != last_pos['z'] and last_pos['z'] is not None:
+                        self.queue_message(f"Layer change detected ({last_pos['z']:.2f} -> {target_pos_for_line['z']:.2f}). Running homing verification...")
+                        try:
+                            self._homing_verification_routine()
+                        except InterruptedError:
+                            # Re-raise to be caught by the outer loop's error handler
+                            raise
+
             elif "G28" in gcode_line.upper():
-                 target_pos_for_line = {'x': self.PRINTER_BOUNDS['x_min'], 'y': self.PRINTER_BOUNDS['y_min'], 'z': self.PRINTER_BOUNDS['z_min']} 
-                 if 'X' not in gcode_line.upper() and 'Y' not in gcode_line.upper() and 'Z' not in gcode_line.upper():
-                     last_pos = target_pos_for_line.copy() # Full home resets all axes.
-                 else: # Partial home
-                     if 'X' in gcode_line.upper(): last_pos['x'] = self.PRINTER_BOUNDS['x_min']
-                     if 'Y' in gcode_line.upper(): last_pos['y'] = self.PRINTER_BOUNDS['y_min']
-                     if 'Z' in gcode_line.upper(): last_pos['z'] = self.PRINTER_BOUNDS['z_min']
-                     target_pos_for_line = last_pos.copy()
+                target_pos_for_line = {
+                    'x': self.PRINTER_BOUNDS['x_min'], 
+                    'y': self.PRINTER_BOUNDS['y_min'], 
+                    'z': self.PRINTER_BOUNDS['z_min'],
+                    'e': 0.0 # Assuming G28 homes E too? Usually not for extrusion, but for 4-axis maybe.
+                } 
+                if 'X' not in gcode_line.upper() and 'Y' not in gcode_line.upper() and 'Z' not in gcode_line.upper():
+                    # Full home. Usually resets XYZ. E behavior depends on firmware.
+                    # Let's assume E is NOT homed by default G28 unless specified, or keep it as is.
+                    # For safety in 4-axis, let's update XYZ and keep E unless E is in command.
+                    target_pos_for_line['e'] = last_pos['e'] 
+                    last_pos.update(target_pos_for_line)
+                else: # Partial home
+                    if 'X' in gcode_line.upper(): last_pos['x'] = self.PRINTER_BOUNDS['x_min']
+                    if 'Y' in gcode_line.upper(): last_pos['y'] = self.PRINTER_BOUNDS['y_min']
+                    if 'Z' in gcode_line.upper(): last_pos['z'] = self.PRINTER_BOUNDS['z_min']
+                    # If E is ever homed via G28 E
+                    if 'E' in gcode_line.upper(): last_pos['e'] = 0.0 
+                    target_pos_for_line = last_pos.copy()
 
             # --- Send Line and Wait for 'ok' ---
             try:
-                self.serial_connection.write(gcode_line.encode('utf-8') + b'\n')
+                line_to_send = self._apply_e_conversion(gcode_line)
+                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
                 ok_received = False
                 response_buffer = ""
                 timeout = self.serial_connection.timeout if self.serial_connection.timeout else 10.0
@@ -2483,20 +3374,61 @@ class GCodeSenderGUI:
                 
                 if ok_received:
                     if target_pos_for_line is not None:
-                         last_pos = target_pos_for_line 
-                         valid_pos = {k: v for k, v in last_pos.items() if v is not None}
-                         if valid_pos:
-                             self.message_queue.put(("POSITION_UPDATE", valid_pos))
+                        last_pos = target_pos_for_line 
+                        valid_pos = {k: v for k, v in last_pos.items() if v is not None}
+                        if valid_pos:
+                            self.message_queue.put(("POSITION_UPDATE", valid_pos))
                     
                     # If the line was a move, increment the progress counter for the toolpath display.
                     if is_move_command or "G28" in gcode_line.upper():
                         moves_sent_in_thread += 1
                         self.message_queue.put(("PATH_PROGRESS_UPDATE", moves_sent_in_thread))
+
+                        # --- Auto-Measurement Logic ---
+                        # Check if DMMs are connected AND Auto-Measure is ON
+                        if self.is_dmm_connected and self.auto_measure_enabled.get():
+                            self.queue_message("Auto-Measure: Stabilizing (M400)...")
+                            
+                            # 1. Send M400 to wait for move completion
+                            m400_ok = False
+                            try:
+                                self.serial_connection.write(b'M400\n')
+                                # M400 blocks until moves are done.
+                                m400_start = time.time()
+                                m400_buffer = ""
+                                while time.time() - m400_start < 60.0: # 60s max wait
+                                    if self.stop_event.is_set(): raise InterruptedError("Stop")
+                                    if self.serial_connection.in_waiting > 0:
+                                        m400_buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                                        if 'ok' in m400_buffer:
+                                            m400_ok = True
+                                            break
+                                    time.sleep(0.1)
+                            except Exception as e:
+                                self.queue_message(f"M400 Error: {e}", "WARN")
+
+                            if m400_ok:
+                                self.queue_message("Auto-Measure: Measuring...")
+                                # 2. Trigger Measurement with Stability Check
+                                if self.dmm_group:
+                                    try:
+                                        # Use the new stability method
+                                        vals = self._measure_with_stability()
+                                        
+                                        self.message_queue.put(("MEASUREMENT_RESULT", vals))
+                                        if self.log_measurements_enabled.get():
+                                            self._log_measurement_to_file(vals, coords=last_pos)
+                                    except Exception as e:
+                                        self.queue_message(f"Auto-Measure Error: {e}", "ERROR")
+                            else:
+                                self.queue_message("Auto-Measure skipped (M400 timeout)", "WARN")
+
                 else:
                     self.queue_message(f"Warning: No 'ok' received for '{gcode_line}' (timeout: {timeout:.1f}s).", "WARN")
 
-            except InterruptedError:
-                self.queue_message("G-code stream interrupted by user.", "WARN")
+            except InterruptedError as e:
+                msg = str(e) if str(e) else "G-code stream interrupted by user."
+                self.queue_message(msg, "WARN" if not str(e) else "ERROR")
                 success = False
                 break
             except serial.SerialException as e:
@@ -2559,6 +3491,7 @@ class GCodeSenderGUI:
                     if 'x' in pos_dict and pos_dict['x'] is not None: self.last_cmd_abs_x = pos_dict['x']
                     if 'y' in pos_dict and pos_dict['y'] is not None: self.last_cmd_abs_y = pos_dict['y']
                     if 'z' in pos_dict and pos_dict['z'] is not None: self.last_cmd_abs_z = pos_dict['z']
+                    if 'e' in pos_dict and pos_dict['e'] is not None: self.last_cmd_abs_e = pos_dict['e']
                     self._update_all_displays()
                 
                 elif msg_type == "PATH_PROGRESS_UPDATE":
@@ -2654,6 +3587,71 @@ class GCodeSenderGUI:
                     messagebox.showerror("Connection Lost", "Serial connection lost.\nPlease reconnect.")
                     self.disconnect_printer(silent=True)
 
+                elif msg_type == "EMERGENCY_STOP_TRIGGERED":
+                    reason = msg_content
+                    self.log_message(f"!!! STOP: {reason} !!!", "CRITICAL")
+                    self.emergency_stop()
+
+                elif msg_type == "HOMING_FAILURE":
+                    diagnosis = msg_content
+                    self.log_message(f"Homing Verification Failed: {diagnosis}", "CRITICAL")
+                    messagebox.showwarning("Homing Verification Failure", 
+                                          f"The printer has drifted from its expected position.\n\n"
+                                          f"DIAGNOSIS:\n{diagnosis}\n\n"
+                                          f"The print has been halted for safety. Please check for mechanical obstructions, "
+                                          f"loose belts, or missed steps. Re-home and restart the program when ready.")
+
+                elif msg_type == "DMM_CONNECTED":
+                    self.is_dmm_connected = True
+                    self.dmm_status_var.set("DMMs: Connected")
+                    self.dmm_connect_button.config(text="Disconnect DMMs", state=tk.NORMAL)
+                    self.measure_button.config(state=tk.NORMAL)
+                    self.log_message("DMMs connected successfully.", "SUCCESS")
+
+                elif msg_type == "DMM_FAIL":
+                    self.is_dmm_connected = False
+                    self.dmm_status_var.set("DMMs: Error")
+                    self.dmm_connect_button.config(text="Connect DMMs", state=tk.NORMAL)
+                    self.measure_button.config(state=tk.DISABLED)
+                    self.log_message(f"DMM Error: {msg_content}", "ERROR")
+
+                elif msg_type == "MEASUREMENT_RESULT":
+                    vals = msg_content 
+                    if vals:
+                         # Config: [Vin, Iin, Vsys, Saux, Vinv, Sinv]
+                         display_str = f"Vin: {vals[0]:.2f}V"
+                         if len(vals) > 1: display_str += f" | Iin: {vals[1]:.2f}"
+                         self.last_measurement_var.set(display_str)
+                         self.log_message(f"Measured: {', '.join([f'{v:.4f}' for v in vals])}", "INFO")
+
+                elif msg_type == "CALIBRATION_COMPLETE":
+                    safe_z_max = msg_content
+                    self.PRINTER_BOUNDS['z_max'] = safe_z_max
+                    self.log_message(f"Auto-Homing Complete. New Z-Max: {safe_z_max:.2f}mm", "SUCCESS")
+                    
+                    # Reset controls
+                    self.is_manual_command_running = False
+                    self._set_manual_controls_state(tk.NORMAL)
+                    self._set_goto_controls_state(tk.NORMAL)
+                    self.start_button.config(state=tk.NORMAL if self.processed_gcode else tk.DISABLED)
+                    self.status_indicator.set_status("on")
+                    
+                    # Re-validate file
+                    if self.gcode_filepath:
+                        self.process_gcode()
+
+                elif msg_type == "CALIBRATION_FAILED":
+                    self.log_message(f"Auto-Homing Failed: {msg_content}", "ERROR")
+                    messagebox.showerror("Homing Failed", msg_content)
+                    
+                    # Reset controls
+                    self.is_manual_command_running = False
+                    self._set_manual_controls_state(tk.NORMAL)
+                    self._set_goto_controls_state(tk.NORMAL)
+                    self.start_button.config(state=tk.NORMAL if self.processed_gcode else tk.DISABLED)
+                    self.status_indicator.set_status("error")
+
+
         except queue.Empty:
             pass # No messages to process.
         finally:
@@ -2687,6 +3685,7 @@ class GCodeSenderGUI:
                     self.root.after_cancel(self.after_id)
                 self.pause_event.set() # Unblock any paused threads
                 self.emergency_stop()
+                self.disconnect_dmms()
                 time.sleep(1) # Give time for stop command to process
                 self.root.destroy()
             else:
@@ -2695,6 +3694,10 @@ class GCodeSenderGUI:
             if self.after_id:
                 self.root.after_cancel(self.after_id)
             self.disconnect_printer(silent=True)
+            self.disconnect_dmms()
+            if HAS_GPIO and GPIO:
+                try: GPIO.cleanup()
+                except: pass
             self.root.destroy()
 
     def _history_up(self, event):
@@ -2782,6 +3785,11 @@ class GCodeSenderGUI:
             # If no file is loaded, we still need to update displays (e.g., crosshair, DROs).
             self._update_all_displays()
 
+    def _open_collision_test_screen(self):
+        """Opens a new window to guide the user through a collision avoidance test."""
+        # For now, a simple placeholder. Full implementation will involve a new Tkinter Toplevel window.
+        messagebox.showinfo("Collision Avoidance Test", "This feature is not yet implemented. It will guide you through testing the rotation limits.")
+
     def _set_coord_mode(self, mode):
         """
         Sets the coordinate display mode for the 'Go To' controls.
@@ -2847,6 +3855,11 @@ class GCodeSenderGUI:
             if hasattr(self, 'footer_coords_var'):
                 self.footer_coords_var.set("X: N/A  Y: N/A  Z: N/A")
 
+        if self.last_cmd_abs_e is not None:
+            self.last_cmd_e_display_var.set(f"{self.last_cmd_abs_e:.2f}")
+        else:
+            self.last_cmd_e_display_var.set("N/A")
+
         # --- Update "Target" (Blue) Display Labels ---
         if mode == "absolute":
             self.goto_x_display_var.set(f"{self.target_abs_x:.2f}")
@@ -2856,6 +3869,8 @@ class GCodeSenderGUI:
             self.goto_x_display_var.set(f"{self.target_abs_x - center_x:.2f}")
             self.goto_y_display_var.set(f"{self.target_abs_y - center_y:.2f}")
             self.goto_z_display_var.set(f"{self.target_abs_z - center_z:.2f}")
+        
+        self.goto_e_display_var.set(f"{self.target_abs_e:.2f}")
 
         # --- Redraw Canvases ---
         # This is necessary to move the position markers.
@@ -2863,6 +3878,8 @@ class GCodeSenderGUI:
             self._draw_xy_canvas_guides()
         if hasattr(self, 'z_canvas') and self.z_canvas.winfo_height() > 1:
             self._draw_z_canvas_marker()
+        if hasattr(self, 'e_canvas') and self.e_canvas.winfo_height() > 1:
+            self._draw_e_canvas_gauge()
         if hasattr(self, 'canvas_3d') and self.canvas_3d:
             self._update_3d_position_marker()
         
@@ -2878,8 +3895,10 @@ class GCodeSenderGUI:
             val_x_str = self.goto_x_entry.get()
             val_y_str = self.goto_y_entry.get()
             val_z_str = self.goto_z_entry.get()
+            val_e_str = self.goto_e_entry.get()
             
             new_abs_x, new_abs_y, new_abs_z = self.target_abs_x, self.target_abs_y, self.target_abs_z
+            new_abs_e = self.target_abs_e
             
             center_x = float(self.center_x_var.get())
             center_y = float(self.center_y_var.get())
@@ -2899,6 +3918,21 @@ class GCodeSenderGUI:
                 val_z = float(val_z_str)
                 new_abs_z = val_z + center_z if mode == "relative" else val_z
                 self.target_abs_z = max(self.PRINTER_BOUNDS['z_min'], min(self.PRINTER_BOUNDS['z_max'], new_abs_z))
+            if val_e_str:
+                val_e = float(val_e_str)
+                # E is Rotation, Center usually doesn't apply, but logic allows relative E if needed.
+                # Assuming E is always absolute angle for "Set E" in this context, or relative if mode is relative.
+                # Let's treat E relative to 0 if mode is relative, effectively additive.
+                new_abs_e = val_e if mode == "absolute" else (val_e + self.target_abs_e) # Relative adds to current target? Or current pos?
+                # Standard behavior for UI input is usually "Set Target to X".
+                # If relative mode is on, input "10" usually means "Current + 10".
+                # BUT here, this function sets the TARGET.
+                # Let's stick to the pattern: Absolute input sets Absolute Target. Relative input adds to Center offset.
+                # Since E doesn't have a "Center" defined in UI, Relative Mode for E is ambiguous.
+                # Let's assume "Set E" is always absolute angle for simplicity, or add to current target if relative?
+                # Re-reading X/Y logic: "val_x + center_x". This implies the input is a coordinate relative to WCS origin.
+                # For E, WCS origin is 0. So Relative Input = Absolute Input.
+                self.target_abs_e = max(self.PRINTER_BOUNDS['e_min'], min(self.PRINTER_BOUNDS['e_max'], new_abs_e))
                 
         except ValueError:
             self.log_message("Invalid coordinate entered in 'Go To' field.", "WARN")
@@ -2906,7 +3940,380 @@ class GCodeSenderGUI:
             # Refresh all displays to show the clamped/updated target position.
             self._update_all_displays()
 
-# --- SCI-FI: New Status Indicator Widget ---
+    # --- DMM Methods ---
+
+    def toggle_dmm_connection(self):
+        if self.is_dmm_connected:
+            self.disconnect_dmms()
+        else:
+            self.dmm_connect_button.config(state=tk.DISABLED)
+            self.dmm_status_var.set("Connecting...")
+            threading.Thread(target=self._connect_dmm_thread, daemon=True).start()
+
+    def _connect_dmm_thread(self):
+        try:
+            if not HAS_PYVISA:
+                self.queue_message("PyVISA not found. Cannot connect.", "ERROR")
+                self.message_queue.put(("DMM_FAIL", "PyVISA Missing"))
+                return
+
+            self.queue_message("Initializing DMMs...")
+            self.dmm_group = DmmGroup(DMM_CONFIG)
+            self.dmm_group.initialize()
+            self.message_queue.put(("DMM_CONNECTED", None))
+        except Exception as e:
+            self.queue_message(f"DMM Connect Error: {e}", "ERROR")
+            self.message_queue.put(("DMM_FAIL", str(e)))
+
+    def disconnect_dmms(self):
+        if self.dmm_group:
+            try:
+                self.dmm_group.close()
+            except: pass
+        self.dmm_group = None
+        self.is_dmm_connected = False
+        self.dmm_status_var.set("DMMs: Disconnected")
+        self.dmm_connect_button.config(text="Connect DMMs")
+        self.measure_button.config(state=tk.DISABLED)
+
+    def trigger_manual_measurement(self):
+        if not self.is_dmm_connected: return
+        self.log_message("Triggering manual measurement...", "INFO")
+        threading.Thread(target=self._measure_thread, args=(True,), daemon=True).start()
+
+    def _measure_thread(self, is_manual=False):
+        """
+        Performs the measurement.
+        is_manual: if True, logs result to GUI console.
+        """
+        if not self.dmm_group: return
+        try:
+            self.dmm_group.trigger()
+            values = self.dmm_group.read()
+            
+            self.message_queue.put(("MEASUREMENT_RESULT", values))
+            
+            # Log to file if enabled
+            if self.log_measurements_enabled.get():
+                self._log_measurement_to_file(values)
+                
+        except Exception as e:
+            self.queue_message(f"Measurement Error: {e}", "ERROR")
+
+    def _measure_with_stability(self):
+        """
+        Takes readings until stability criteria are met or retries exhausted.
+        Returns the final averaged list of values.
+        """
+        if not self.dmm_group: return []
+
+        threshold_pct = self.stability_threshold_var.get()
+        max_retries = self.max_retries_var.get()
+        measurements_per_point = self.measurements_per_point_var.get()
+        pre_delay = self.pre_measure_delay_var.get()
+        
+        if measurements_per_point < 2: measurements_per_point = 2 # Minimum for std dev
+
+        # 1. Pre-Measure Delay
+        if pre_delay > 0:
+            self.queue_message(f"Stabilizing... ({pre_delay}s)")
+            time.sleep(pre_delay)
+
+        # 2. Fill initial window
+        history = []
+        for _ in range(measurements_per_point):
+             self.dmm_group.trigger()
+             history.append(self.dmm_group.read())
+        
+        attempts = 0
+        stable = False
+        
+        while attempts < max_retries:
+            # Transpose history to get lists of values per DMM channel
+            channels = list(zip(*history))
+            
+            max_dev = 0.0
+            for channel_data in channels:
+                if not channel_data: continue
+                
+                mean = sum(channel_data) / len(channel_data)
+                if mean == 0: continue 
+                
+                variance = sum([((x - mean) ** 2) for x in channel_data]) / len(channel_data)
+                std_dev = variance ** 0.5
+                
+                pct_dev = (std_dev / abs(mean)) * 100
+                if pct_dev > max_dev:
+                    max_dev = pct_dev
+
+            self.queue_message(f"Stability Check: Max Dev = {max_dev:.3f}% (Threshold: {threshold_pct}%)")
+            
+            if max_dev <= threshold_pct:
+                stable = True
+                break
+            
+            # Not stable, take another reading
+            self.dmm_group.trigger()
+            new_reading = self.dmm_group.read()
+            
+            # Maintain sliding window size
+            history.append(new_reading)
+            while len(history) > measurements_per_point:
+                history.pop(0)
+            
+            attempts += 1
+            time.sleep(0.2) 
+
+        if not stable:
+            self.queue_message("Warning: Stability threshold not met. Proceeding with last reading.", "WARN")
+        else:
+             self.queue_message("Readings stabilized.", "SUCCESS")
+
+        # Return the average of the current history window
+        final_avg = []
+        if history:
+            final_channels = list(zip(*history))
+            for ch in final_channels:
+                final_avg.append(sum(ch) / len(ch))
+        return final_avg
+
+    def select_log_file(self):
+        """Opens a file dialog to choose the CSV log file."""
+        filename = filedialog.asksaveasfilename(
+            title="Save Measurement Log",
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            initialfile=self.log_filepath_var.get()
+        )
+        if filename:
+            self.log_filepath_var.set(filename)
+
+    def _log_measurement_to_file(self, values, coords=None):
+        filepath = self.log_filepath_var.get()
+        if not filepath:
+            self.queue_message("Log Error: No filename specified.", "ERROR")
+            return
+
+        # Check if file exists to write header
+        file_exists = False
+        try:
+            with open(filepath, 'r', encoding='utf-8'): 
+                file_exists = True
+        except FileNotFoundError: 
+            pass
+        except Exception: 
+            pass # Permission error or other
+        
+        try:
+            with open(filepath, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # Write header if new file
+                if not file_exists:
+                    headers = ["Timestamp", "X", "Y", "Z"] + [d[2] for d in DMM_CONFIG]
+                    writer.writerow(headers)
+                    self.queue_message(f"Created log file: {filepath}", "SUCCESS")
+
+                if coords:
+                    log_x = coords.get('x', 0.0)
+                    log_y = coords.get('y', 0.0)
+                    log_z = coords.get('z', 0.0)
+                else:
+                    # Get current position (use last known)
+                    log_x = self.last_cmd_abs_x if self.last_cmd_abs_x is not None else 0.0
+                    log_y = self.last_cmd_abs_y if self.last_cmd_abs_y is not None else 0.0
+                    log_z = self.last_cmd_abs_z if self.last_cmd_abs_z is not None else 0.0
+                
+                row = [datetime.now().isoformat(), log_x, log_y, log_z] + values
+                writer.writerow(row)
+        except Exception as log_err:
+            self.queue_message(f"Log Write Error: {log_err}", "ERROR")
+
+
+    # --- Collision Avoidance Test Screen ---
+
+    def _open_collision_test_screen(self):
+        """Swaps the main UI for the Collision Avoidance Test screen."""
+        if not self.serial_connection:
+            messagebox.showerror("Error", "Not connected to printer.")
+            return
+
+        if not self.processed_gcode:
+            messagebox.showerror("Setup Error", "Error: Must load test profile before the test")
+            return
+
+        # Hide the main view
+        self.main_view_frame.pack_forget()
+
+        # Create the test view frame
+        self.test_view_frame = tk.Frame(self.root, bg=self.COLOR_BG)
+        self.test_view_frame.pack(fill=tk.BOTH, expand=True)
+
+        # --- Content ---
+        # 1. Warning Label
+        warning_frame = tk.Frame(self.test_view_frame, bg=self.COLOR_ACCENT_AMBER, padx=20, pady=20)
+        warning_frame.pack(fill=tk.X, padx=50, pady=(50, 20))
+        
+        lbl_warn = tk.Label(warning_frame, text="⚠ CAUTION ⚠", 
+                            font=("Inter", 24, "bold"), bg=self.COLOR_ACCENT_AMBER, fg=self.COLOR_BLACK)
+        lbl_warn.pack()
+        
+        lbl_msg = tk.Label(warning_frame, text="Remove hub and implant to avoid damage to equipment.", 
+                           font=("Inter", 16), bg=self.COLOR_ACCENT_AMBER, fg=self.COLOR_BLACK)
+        lbl_msg.pack(pady=(10, 0))
+
+        # 2. Controls Frame
+        ctrl_frame = tk.Frame(self.test_view_frame, bg=self.COLOR_BG)
+        ctrl_frame.pack(expand=True)
+
+        # Begin Test Button
+        self.btn_begin_test = tk.Button(ctrl_frame, text="BEGIN TEST", 
+                                        font=("Orbitron", 18, "bold"), 
+                                        bg=self.COLOR_ACCENT_CYAN, fg=self.COLOR_BLACK,
+                                        activebackground="#00eaff", activeforeground=self.COLOR_BLACK,
+                                        relief=tk.RAISED, bd=3, padx=30, pady=15,
+                                        command=self._start_collision_test)
+        self.btn_begin_test.pack(pady=20)
+
+        # STOP MOTION Button (Big Red)
+        self.btn_stop_test = tk.Button(ctrl_frame, text="STOP MOTION", 
+                                       font=("Orbitron", 24, "bold"), 
+                                       bg=self.COLOR_ACCENT_RED, fg="white",
+                                       activebackground="#ff6666", activeforeground="white",
+                                       relief=tk.RAISED, bd=5, padx=50, pady=30,
+                                       command=self.emergency_stop)
+        self.btn_stop_test.pack(pady=20)
+
+        # Status Label for Test
+        self.lbl_test_status = tk.Label(ctrl_frame, text="Ready", font=("Inter", 14), bg=self.COLOR_BG, fg=self.COLOR_TEXT_SECONDARY)
+        self.lbl_test_status.pack(pady=10)
+
+        # Exit Button (Small)
+        self.btn_exit_test = tk.Button(self.test_view_frame, text="Exit Test", 
+                                       font=("Inter", 12), 
+                                       bg=self.COLOR_PANEL_BG, fg=self.COLOR_TEXT_PRIMARY,
+                                       relief=tk.FLAT, padx=20, pady=10,
+                                       command=self._close_collision_test_screen)
+        self.btn_exit_test.pack(side=tk.BOTTOM, pady=30)
+
+    def _close_collision_test_screen(self):
+        """Restores the main UI."""
+        if hasattr(self, 'test_view_frame') and self.test_view_frame:
+            self.test_view_frame.destroy()
+        
+        self.main_view_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _start_collision_test(self):
+        """Starts the collision test sequence in a background thread."""
+        if self.is_sending or self.is_manual_command_running:
+            return
+        
+        self.btn_begin_test.config(state=tk.DISABLED)
+        self.btn_exit_test.config(state=tk.DISABLED)
+        self.lbl_test_status.config(text="Moving to Center...", fg=self.COLOR_ACCENT_CYAN)
+        
+        threading.Thread(target=self._collision_test_worker, daemon=True).start()
+
+    def _collision_test_worker(self):
+        """
+        Background worker for the collision test.
+        1. Move to Center (X, Y).
+        2. Sweep Tilt (E) through the full range found in the loaded G-code.
+        """
+        try:
+            self.is_manual_command_running = True
+            
+            # --- 1. Range Calculation ---
+            min_e = 0.0
+            max_e = 0.0
+            found_e = False
+
+            # Scan processed G-code for E limits
+            # processed_gcode contains strings like "G1 X10 Y10 E45 F1000"
+            for line in self.processed_gcode:
+                if 'E' in line.upper():
+                    import re as local_re
+                    match = local_re.search(r"E([-+]?\d*\.?\d+)", line)
+                    if match:
+                        val = float(match.group(1))
+                        if not found_e:
+                            min_e = val
+                            max_e = val
+                            found_e = True
+                        else:
+                            if val < min_e: min_e = val
+                            if val > max_e: max_e = val
+            
+            if not found_e:
+                # Fallback if no E moves found (e.g. flat print)
+                self.queue_message("No rotation (E) found in G-code. Using default +/- 10°.", "WARN")
+                min_e = -10.0
+                max_e = 10.0
+            
+            # Add a small safety buffer or use exact? 
+            # Request said "full range of rotation requested". Let's stick to exact per file.
+            self.queue_message(f"Test Range: E{min_e:.1f}° to E{max_e:.1f}°", "INFO")
+
+            
+            # --- 2. Execution ---
+
+            # Get Center
+            try:
+                cx = float(self.center_x_var.get())
+                cy = float(self.center_y_var.get())
+            except ValueError:
+                self.queue_message("Invalid Center Coordinates!", "ERROR")
+                return
+
+            speed = 1000 # mm/min or deg/min
+            
+            # Move to Center
+            self.queue_message(f"Moving to Center ({cx}, {cy})...")
+            cmd = f"G90\nG1 X{cx} Y{cy} F{speed}\nM400\n"
+            self.serial_connection.write(cmd.encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Move to Center timeout")
+
+            # Tilt Sweep
+            # Move to Min E
+            self.queue_message(f"Tilting to Min ({min_e:.1f}°)...")
+            cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Tilt Min timeout")
+
+            # Move to Max E
+            self.queue_message(f"Tilting to Max ({max_e:.1f}°)...")
+            cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
+            if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
+
+            # Return to 0
+            self.queue_message("Returning to 0°...")
+            cmd = self._apply_e_conversion(f"G1 E0 F{speed}\nM400\n")
+            self.serial_connection.write(cmd.encode('utf-8'))
+            if not self._wait_for_ok(timeout=30): raise Exception("Return 0 timeout")
+
+            self.rotation_crash_test_complete = True
+            self.queue_message("Collision Test Complete.", "SUCCESS")
+            
+        except Exception as e:
+            self.queue_message(f"Test Failed: {e}", "ERROR")
+            if "Error: Must load" in str(e):
+                messagebox.showerror("Setup Error", str(e))
+
+        finally:
+            self.is_manual_command_running = False
+            # Update UI via queue or invoke
+            self.root.after(0, self._reset_test_ui)
+
+    def _reset_test_ui(self):
+        """Re-enables the test screen buttons."""
+        if hasattr(self, 'btn_begin_test'):
+            self.btn_begin_test.config(state=tk.NORMAL)
+            self.btn_exit_test.config(state=tk.NORMAL)
+            self.lbl_test_status.config(text="Test Complete", fg=self.COLOR_TEXT_PRIMARY)
+
+
+# --- Status Indicator Widget ---
 class StatusIndicator(tk.Canvas):
     """
     A custom widget that displays a glowing, colored "LED" to indicate status.
