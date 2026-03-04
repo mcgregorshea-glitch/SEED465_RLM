@@ -379,9 +379,16 @@ class GCodeSenderGUI:
                         bordercolor=self.COLOR_BORDER,
                         arrowcolor=self.COLOR_ACCENT_CYAN,
                         background=self.COLOR_BLACK,
+                        selectbackground=self.COLOR_BLACK,
+                        selectforeground=self.COLOR_ACCENT_CYAN,
                         padding=6,
                         font=self.FONT_MONO)
-        style.map('TCombobox', bordercolor=[('focus', self.COLOR_ACCENT_CYAN)])
+        style.map('TCombobox', 
+                  bordercolor=[('focus', self.COLOR_ACCENT_CYAN)],
+                  fieldbackground=[('readonly', self.COLOR_BLACK)],
+                  background=[('readonly', self.COLOR_BLACK)],
+                  selectbackground=[('readonly', self.COLOR_BLACK)],
+                  selectforeground=[('readonly', self.COLOR_ACCENT_CYAN)])
 
         # Style the Combobox dropdown list (OS-dependent).
         self.root.option_add('*TCombobox*Listbox.background', self.COLOR_BLACK)
@@ -648,6 +655,9 @@ class GCodeSenderGUI:
         self.root.after(300, self.rescan_ports)
         # Perform an initial update of all display labels and canvases.
         self.root.after(150, self._update_all_displays)
+        
+        # Globally remove focus from comboboxes after selection to prevent text highlighting
+        self.root.bind_class('TCombobox', '<<ComboboxSelected>>', lambda e: self.root.focus_set())
         
 
 
