@@ -110,7 +110,13 @@ class DmmGroup:
                 "PyVISA is not installed. Install with:\n"
                 "  pip install pyvisa pyvisa-py"
             )
-        self.pvrmgr = ResourceManager()
+        try:
+            # Explicitly force the pyvisa-py backend for Linux/Raspberry Pi
+            self.pvrmgr = ResourceManager('@py')
+        except Exception:
+            # Fallback for Windows where default NI-VISA is used
+            self.pvrmgr = ResourceManager()
+            
         errors = []
         for dmm in self.dmms:
             try:
@@ -118,7 +124,7 @@ class DmmGroup:
             except ConnectionError as e:
                 errors.append(str(e))
         if errors:
-            raise ConnectionError("\n\n".join(errors))
+            raise ConnectionError("\n\n---\n\n".join(errors))
         for dmm in self.dmms:
             dmm.setup(mode)
 
