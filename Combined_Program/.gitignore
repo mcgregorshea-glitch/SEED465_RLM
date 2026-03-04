@@ -21,3 +21,6 @@ pip-selfcheck.json
 # IDEs
 .vscode/
 .idea/
+
+# Project Specifics
+SYSTEM_PROMPT.md
