@@ -3,5 +3,6 @@ numpy
 matplotlib
 pyvisa
 pyvisa-py
+vxi11
 psutil
 zeroconf
