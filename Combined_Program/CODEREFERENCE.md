@@ -1,8 +1,8 @@
 # Code Reference
 
-This document explains the internal working of the `gcode_generator.py` and `gcode_sender.py` programs.
+This document explains the internal working of the `generator_panel.py` and `sender_panel.py` programs.
 
-## 1. Pattern Generator (`src/gcode_generator.py`)
+## 1. Pattern Generator (`generator_panel.py`)
 
 This program generates G-code or CSV files for a 3D printer scan pattern. It calculates a "snake-like" (boustrophedon) path within a defined volume.
 
@@ -51,7 +51,7 @@ This program generates G-code or CSV files for a 3D printer scan pattern. It cal
 
 ---
 
-## 2. G-Code Sender (`src/gcode_sender.py`)
+## 2. G-Code Sender (`sender_panel.py`)
 
 This program controls the 3D printer via serial USB. It handles connection, manual jogging, file streaming, and DMM data logging.
 

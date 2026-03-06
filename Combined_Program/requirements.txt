@@ -3,3 +3,5 @@ numpy
 matplotlib
 pyvisa
 pyvisa-py
+psutil
+zeroconf

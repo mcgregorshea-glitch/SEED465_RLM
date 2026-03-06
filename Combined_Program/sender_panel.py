@@ -99,9 +99,10 @@ class DmmInst:
 
 class DmmGroup:
     def __init__(self, config: list) -> None:
-        self.dmms: list[DmmInst] = []
+        self.all_dmms: list[DmmInst] = []
         for info in config:
-            self.dmms.append(DmmInst(*info)) # type: ignore
+            self.all_dmms.append(DmmInst(*info)) # type: ignore
+        self.dmms: list[DmmInst] = [] # Only successfully connected DMMs go here
         self.pvrmgr: Any = None
 
     def initialize(self, mode: str = 'VOLT:DC') -> None:
@@ -117,23 +118,37 @@ class DmmGroup:
             # Fallback for Windows where default NI-VISA is used
             self.pvrmgr = ResourceManager()
             
+        self.dmms = []
         errors = []
-        for dmm in self.dmms:
+        for dmm in self.all_dmms:
             try:
+                # Attempt to connect to this DMM
                 dmm.connect(self.pvrmgr)
-            except ConnectionError as e:
-                errors.append(str(e))
-        if errors:
-            raise ConnectionError("\n\n---\n\n".join(errors))
-        for dmm in self.dmms:
-            dmm.setup(mode)
+                dmm.setup(mode)
+                self.dmms.append(dmm)
+                # User preference: Only connect to one multimeter at a time.
+                # Stop as soon as the first successful connection is made.
+                break
+            except Exception as e:
+                # Suppress individual errors, just collect them in case all fail
+                errors.append(f"{dmm.name} (ID {dmm.id}): {e}")
+                continue
+
+        if not self.dmms:
+            # Only raise an error if NO multimeters were connectable
+            raise ConnectionError(
+                "No DMMs could be connected. Please check network/power.\n" + 
+                "\n".join(errors)
+            )
 
     def trigger(self) -> None:
         for dmm in self.dmms:
             dmm.trigger()
 
     def read(self) -> list:
-        # Block until all DMMs are ready
+        # Block until all connected DMMs are ready
+        if not self.dmms: return []
+        
         ready = False
         start_time = time.time()
         timeout = 60.0 # 60 seconds timeout
@@ -141,7 +156,6 @@ class DmmGroup:
         while not ready:
             if time.time() - start_time > timeout:
                 print(f"TIMEOUT: DMM measurement took longer than {timeout}s.")
-                print("LIMITATION: Measurement timed out. Returning 0.0. Ensure DMM is not waiting for an external trigger.")
                 return [0.0] * len(self.dmms)
 
             ready = True
@@ -3735,9 +3749,15 @@ class GCodeSenderGUI:
                 elif msg_type == "MEASUREMENT_RESULT":
                     vals = msg_content 
                     if vals:
-                         # Config: [Vin, Iin, Vsys, Saux, Vinv, Sinv]
-                         display_str = f"Vin: {vals[0]:.2f}V"
-                         if len(vals) > 1: display_str += f" | Iin: {vals[1]:.2f}"
+                         # Dynamic display based on connected DMMs
+                         if self.dmm_group and self.dmm_group.dmms:
+                             name = self.dmm_group.dmms[0].name
+                             display_str = f"{name}: {vals[0]:.4f}"
+                             if len(vals) > 1: 
+                                 display_str += f" | {self.dmm_group.dmms[1].name}: {vals[1]:.4f}"
+                         else:
+                             display_str = f"Val: {vals[0]:.4f}"
+                             
                          self.last_measurement_var.set(display_str)
                          self.log_message(f"Measured: {', '.join([f'{v:.4f}' for v in vals])}", "INFO")
 
