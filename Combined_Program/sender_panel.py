@@ -61,10 +61,11 @@ class DmmInst:
     def connect(self, pvrmgr: Any) -> None:
         if not pvrmgr: return
         
-        # Try two common resource string formats
+        # Try three common resource string formats
         resource_formats = [
             f'TCPIP0::10.123.210.{self.id}::inst0::INSTR',
-            f'TCPIP::10.123.210.{self.id}::INSTR'
+            f'TCPIP::10.123.210.{self.id}::INSTR',
+            f'TCPIP::10.123.210.{self.id}::5025::SOCKET' # Added port-specific socket fallback
         ]
         
         errors = []
