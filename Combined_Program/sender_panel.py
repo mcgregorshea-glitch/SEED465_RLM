@@ -28,11 +28,11 @@ except ImportError:
 
 # --- DMM Integration Classes ---
 DMM_CONFIG = [
+    [102, 100, 'VINV'], # Moved to top as it's the primary device
     [120, 100, 'VINP'],
     [104, 100, 'IINP', 1e3],
     [107, 100, 'VSYS'],
     [103, 100, 'SAUX', 1e3],
-    [102, 100, 'VINV'],
     [109, 100, 'SINV', 1e3],
 ]
 
@@ -60,21 +60,34 @@ class DmmInst:
 
     def connect(self, pvrmgr: Any) -> None:
         if not pvrmgr: return
-        id_str = f'TCPIP0::10.123.210.{self.id}::inst0::INSTR'
-        try:
-            self.pv = pvrmgr.open_resource(id_str)
-            self.pv.timeout = 60000  # 60 second VISA timeout
-        except Exception as e:
-            self.pv = None
-            raise ConnectionError(
-                f"Failed to connect to DMM '{self.name}' at {id_str}.\n"
-                f"Error: {e}\n"
-                f"Troubleshooting:\n"
-                f"  1. Verify the DMM is powered on and connected to the network\n"
-                f"  2. Confirm IP address 10.123.210.{self.id} is reachable (try ping)\n"
-                f"  3. Check that no other software is using this VISA resource\n"
-                f"  4. Ensure NI-VISA or Keysight IO Libraries are installed"
-            )
+        
+        # Try two common resource string formats
+        resource_formats = [
+            f'TCPIP0::10.123.210.{self.id}::inst0::INSTR',
+            f'TCPIP::10.123.210.{self.id}::INSTR'
+        ]
+        
+        errors = []
+        for id_str in resource_formats:
+            try:
+                self.pv = pvrmgr.open_resource(id_str)
+                self.pv.timeout = 60000  # 60 second VISA timeout
+                # Test connectivity with an IDN query
+                self.pv.query("*IDN?")
+                return # Success!
+            except Exception as e:
+                if self.pv:
+                    try: self.pv.close()
+                    except: pass
+                self.pv = None
+                errors.append(f"{id_str}: {e}")
+        
+        # If we get here, both formats failed
+        raise ConnectionError(
+            f"Failed to connect to DMM '{self.name}' at 10.123.210.{self.id}.\n"
+            f"Tried formats: {', '.join(resource_formats)}\n"
+            f"Errors: {'; '.join(errors)}"
+        )
 
     def setup(self, mode: str = 'VOLT:DC') -> None:
         if self.pv:
