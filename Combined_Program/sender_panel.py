@@ -11,6 +11,8 @@ from datetime import datetime
 import os
 from typing import Any, Optional, Dict, List, Tuple
 
+DMM_IP = "10.247.103"
+
 # Optional PyVISA import for DMM control
 try:
     from pyvisa import ResourceManager # type: ignore
@@ -27,6 +29,8 @@ except ImportError:
     HAS_NUMPY = False
 
 # --- DMM Integration Classes ---
+DMM_IP_PREFIX = '10.247.103'
+
 DMM_CONFIG = [
     [102, 100, 'VINV'], # Moved to top as it's the primary device
     [120, 100, 'VINP'],
@@ -58,14 +62,14 @@ class DmmInst:
         self.scale = scale
         self.pv: Any = None
 
-    def connect(self, pvrmgr: Any) -> None:
+    def connect(self, pvrmgr: Any, ip_prefix: str = DMM_IP_PREFIX) -> None:
         if not pvrmgr: return
         
         # Try three common resource string formats
         resource_formats = [
-            f'TCPIP0::10.123.210.{self.id}::inst0::INSTR',
-            f'TCPIP::10.123.210.{self.id}::INSTR',
-            f'TCPIP::10.123.210.{self.id}::5025::SOCKET' # Added port-specific socket fallback
+            f'TCPIP0::{ip_prefix}.{self.id}::inst0::INSTR',
+            f'TCPIP::{ip_prefix}.{self.id}::INSTR',
+            f'TCPIP::{ip_prefix}.{self.id}::5025::SOCKET' # Added port-specific socket fallback
         ]
         
         errors = []
@@ -85,7 +89,7 @@ class DmmInst:
         
         # If we get here, both formats failed
         raise ConnectionError(
-            f"Failed to connect to DMM '{self.name}' at 10.123.210.{self.id}.\n"
+            f"Failed to connect to DMM '{self.name}' at {ip_prefix}.{self.id}.\n"
             f"Tried formats: {', '.join(resource_formats)}\n"
             f"Errors: {'; '.join(errors)}"
         )
@@ -119,7 +123,7 @@ class DmmGroup:
         self.dmms: list[DmmInst] = [] # Only successfully connected DMMs go here
         self.pvrmgr: Any = None
 
-    def initialize(self, mode: str = 'VOLT:DC') -> None:
+    def initialize(self, mode: str = 'VOLT:DC', ip_prefix: str = DMM_IP_PREFIX) -> None:
         if not HAS_PYVISA or not ResourceManager:
             raise ImportError(
                 "PyVISA is not installed. Install with:\n"
@@ -137,7 +141,7 @@ class DmmGroup:
         for dmm in self.all_dmms:
             try:
                 # Attempt to connect to this DMM
-                dmm.connect(self.pvrmgr)
+                dmm.connect(self.pvrmgr, ip_prefix)
                 dmm.setup(mode)
                 self.dmms.append(dmm)
                 # User preference: Only connect to one multimeter at a time.
@@ -513,6 +517,7 @@ class GCodeSenderGUI:
         self.connection_status_var = tk.StringVar(value="Status: Disconnected")
 
         # --- DMM / Measurement State ---
+        self.dmm_ip_prefix_var = tk.StringVar(value=DMM_IP_PREFIX)
         self.dmm_group = None
         self.is_dmm_connected = False
         self.auto_measure_enabled = tk.BooleanVar(value=False)
@@ -816,6 +821,14 @@ class GCodeSenderGUI:
         
         ttk.Label(conn_frame, textvariable=self.dmm_status_var, style='Filepath.TLabel').pack(side=tk.LEFT)
 
+        # IP Prefix Selector
+        ip_frame = ttk.Frame(frame, style='Panel.TFrame')
+        ip_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        ttk.Label(ip_frame, text="IP Prefix:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
+        self.dmm_ip_prefix_entry = ttk.Entry(ip_frame, textvariable=self.dmm_ip_prefix_var, width=15, font=self.FONT_MONO)
+        self.dmm_ip_prefix_entry.pack(side=tk.LEFT, padx=(5, 10))
+
         # DMM Mode Selector
         mode_frame = ttk.Frame(frame, style='Panel.TFrame')
         mode_frame.pack(fill=tk.X, pady=(0, 5))
@@ -888,6 +901,16 @@ class GCodeSenderGUI:
         scpi_mode = DMM_MODES.get(mode_name, 'VOLT:DC')
         self.log_message(f"DMM Mode changed to: {mode_name} ({scpi_mode})", "INFO")
         
+        # Check if log exists and has data
+        filepath = self.log_filepath_var.get()
+        if filepath and os.path.exists(filepath):
+            try:
+                if os.path.getsize(filepath) > 0:
+                    if messagebox.askyesno("Change Log File?", f"The DMM mode has been changed to '{mode_name}', but the current log file already contains data from a previous mode.\n\nWould you like to select a new log file to prevent conflicting data units?"):
+                        self.select_log_file()
+            except Exception as e:
+                self.log_message(f"Could not check log file size: {e}", "WARN")
+                
         # If DMMs are already connected, reconfigure them live
         if self.is_dmm_connected and self.dmm_group:
             try:
@@ -4081,7 +4104,7 @@ class GCodeSenderGUI:
             selected_mode = DMM_MODES.get(self.dmm_mode_var.get(), 'VOLT:DC')
             self.queue_message(f"Initializing DMMs (Mode: {self.dmm_mode_var.get()})...")
             self.dmm_group = DmmGroup(DMM_CONFIG)
-            self.dmm_group.initialize(mode=selected_mode)
+            self.dmm_group.initialize(mode=selected_mode, ip_prefix=self.dmm_ip_prefix_var.get())
             self.message_queue.put(("DMM_CONNECTED", None))
         except Exception as e:
             self.queue_message(f"DMM Connect Error:\n{e}", "ERROR")
@@ -4219,10 +4242,8 @@ class GCodeSenderGUI:
         # Check if file exists to write header
         file_exists = False
         try:
-            with open(filepath, 'r', encoding='utf-8'): 
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 file_exists = True
-        except FileNotFoundError: 
-            pass
         except Exception: 
             pass # Permission error or other
         
@@ -4232,7 +4253,8 @@ class GCodeSenderGUI:
                 
                 # Write header if new file
                 if not file_exists:
-                    headers = ["Timestamp", "X", "Y", "Z"] + [d[2] for d in DMM_CONFIG]
+                    mode = self.dmm_mode_var.get()
+                    headers = ["Timestamp", "X", "Y", "Z"] + [f"{d[2]} ({mode})" for d in DMM_CONFIG]
                     writer.writerow(headers)
                     self.queue_message(f"Created log file: {filepath}", "SUCCESS")
 
