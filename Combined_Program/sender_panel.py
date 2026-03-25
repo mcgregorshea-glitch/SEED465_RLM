@@ -9,6 +9,7 @@ import serial.tools.list_ports # For port scanning
 import csv
 from datetime import datetime
 import os
+import webbrowser
 from typing import Any, Optional, Dict, List, Tuple
 
 DMM_IP = "10.247.103"
@@ -447,6 +448,24 @@ class GCodeSenderGUI:
         # --- PanedWindow Sash Style ---
         style.configure('Sash', background=self.COLOR_BG, sashthickness=6, relief=tk.FLAT)
         style.map('Sash', background=[('active', self.COLOR_ACCENT_CYAN)])
+
+        # --- Green-border LabelFrame (section complete) ---
+        style.configure('Green.TLabelframe',
+                        background=self.COLOR_PANEL_BG,
+                        bordercolor=self.COLOR_ACCENT_GREEN,
+                        relief=tk.SOLID, borderwidth=2)
+        style.configure('Green.TLabelframe.Label',
+                        background=self.COLOR_PANEL_BG,
+                        foreground=self.COLOR_ACCENT_GREEN,
+                        font=self.FONT_BODY_BOLD)
+        style.configure('Grey.TLabelframe',
+                        background=self.COLOR_PANEL_BG,
+                        bordercolor=self.COLOR_BORDER,
+                        relief=tk.SOLID, borderwidth=1)
+        style.configure('Grey.TLabelframe.Label',
+                        background=self.COLOR_PANEL_BG,
+                        foreground=self.COLOR_TEXT_SECONDARY,
+                        font=self.FONT_BODY_BOLD)
         
         # --- Scrollbar Style ---
         style.configure('TScrollbar',
@@ -511,6 +530,7 @@ class GCodeSenderGUI:
         self.center_x_var = tk.StringVar(value="110.0")
         self.center_y_var = tk.StringVar(value="110.0")
         self.center_z_var = tk.StringVar(value="0.0")
+        self.center_e_var = tk.StringVar(value="0.0")
         self.available_ports = ["Auto-detect"] + self._get_available_ports()
         self.port_var = tk.StringVar(value=self.available_ports[0] if self.available_ports else "")
         self.baud_var = tk.StringVar(value="115200")
@@ -520,17 +540,14 @@ class GCodeSenderGUI:
         self.dmm_ip_prefix_var = tk.StringVar(value=DMM_IP_PREFIX)
         self.dmm_group = None
         self.is_dmm_connected = False
-        self.auto_measure_enabled = tk.BooleanVar(value=False)
+        self.auto_measure_enabled = tk.BooleanVar(value=True)
         self.log_measurements_enabled = tk.BooleanVar(value=True)
         self.measurement_log_file = None # Internal file handle/flag
         self.log_filepath_var = tk.StringVar(value="") # Initialize empty, set on G-code load
         self.dmm_status_var = tk.StringVar(value="DMMs: Disconnected")
         self.dmm_mode_var = tk.StringVar(value="DC Voltage")
         self.last_measurement_var = tk.StringVar(value="Last: --")
-        self.stability_threshold_var = tk.DoubleVar(value=1.0) # 1.0%
-        self.max_retries_var = tk.IntVar(value=10)
-        self.measurements_per_point_var = tk.IntVar(value=3)
-        self.pre_measure_delay_var = tk.DoubleVar(value=0.5) # seconds
+        self.pre_measure_delay_var = tk.DoubleVar(value=0.2) # seconds
 
 
         self.jog_step_var = tk.StringVar(value="10")
@@ -660,15 +677,19 @@ class GCodeSenderGUI:
         self.canvas_3d = None
         self.marker_3d = None
 
-        # --- Populate the GUI panels ---
+        # --- Populate the GUI panels (in setup-flow order) ---
         self.create_connection_frame(self.left_panel_scrollable)
         self.create_measurement_frame(self.left_panel_scrollable)
-        self.create_file_center_frame(self.left_panel_scrollable)
-        self.create_control_frame(self.left_panel_scrollable)
-        self.create_progress_frame(self.left_panel_scrollable)
+        self.create_file_center_frame(self.left_panel_scrollable)   # SETUP (center XYZ)
+        self.create_control_frame(self.left_panel_scrollable)        # EXECUTION CONTROL (file + progress merged in)
         self.create_position_control_frame(self.left_panel_scrollable)
         self.create_manual_control_frame(self.left_panel_scrollable)
-        
+
+        # Variable traces for green-border feedback
+        self.log_measurements_enabled.trace_add('write', lambda varname, index, mode: self._update_section_borders())
+        self.log_filepath_var.trace_add('write', lambda varname, index, mode: self._update_section_borders())
+        self.file_path_var.trace_add('write', lambda varname, index, mode: self._update_section_borders())
+
         # Populate the tabs
         self.create_log_panel(cli_tab)
         self.create_3d_display_panel(display_tab)
@@ -729,38 +750,42 @@ class GCodeSenderGUI:
         coord_label.pack(side=tk.RIGHT)
 
     def create_file_center_frame(self, parent):
-        """Creates the 'SETUP' panel for file selection and defining the center point."""
-        frame = ttk.LabelFrame(parent, text="SETUP", padding="10")
+        """Creates the 'SETUP' panel for defining the center point and running calibration."""
+        self._setup_frame = ttk.LabelFrame(parent, text="SETUP", padding="10", style='Grey.TLabelframe')
+        frame = self._setup_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
-        frame.columnconfigure(1, weight=1); frame.columnconfigure(3, weight=1); frame.columnconfigure(5, weight=1); frame.columnconfigure(6, weight=1)
+        frame.columnconfigure(0, weight=1); frame.columnconfigure(1, weight=1); frame.columnconfigure(2, weight=1); frame.columnconfigure(3, weight=1); frame.columnconfigure(4, weight=1)
 
-        ttk.Button(frame, text="Select G-Code File", command=self.select_file).grid(row=0, column=0, columnspan=2, padx=(0, 5), sticky="ew")
-        ttk.Label(frame, textvariable=self.file_path_var, wraplength=300, style='Filepath.TLabel').grid(row=0, column=2, columnspan=5, sticky="ew")
-        
-        # Entry fields for the user to define the "center" of their workpiece in the printer's coordinate system.
-        ttk.Label(frame, text="Center X:").grid(row=1, column=0, sticky="w", pady=(5,0));
+        # Row 0: Setup Action Buttons
+        self.mark_center_button = ttk.Button(frame, text="Mark Current as Center", command=self._mark_current_as_center, state=tk.DISABLED)
+        self.mark_center_button.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0,10), padx=(0,5))
+
+        self.collision_test_button = ttk.Button(frame, text="Collision Avoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED)
+        self.collision_test_button.grid(row=0, column=2, columnspan=3, sticky="ew", pady=(0,10), padx=(5,0))
+
+        # Row 1: Labels
+        ttk.Label(frame, text="Center X:").grid(row=1, column=0, sticky="w", padx=(0, 5))
+        ttk.Label(frame, text="Center Y:").grid(row=1, column=1, sticky="w", padx=(5, 5))
+        ttk.Label(frame, text="Center Z:").grid(row=1, column=2, sticky="w", padx=(5, 5))
+        ttk.Label(frame, text="Center E:").grid(row=1, column=3, sticky="w", padx=(5, 5))
+        ttk.Label(frame, text="E-Cal (mm/°):").grid(row=1, column=4, sticky="w", padx=(5, 5))
+
+        # Row 2: Entries and Lock Toggle
         self.center_x_entry = ttk.Entry(frame, textvariable=self.center_x_var, width=8)
-        self.center_x_entry.grid(row=1, column=1, sticky="ew", pady=(5,0), padx=(0, 5))
-        
-        ttk.Label(frame, text="Center Y:").grid(row=1, column=2, sticky="w", padx=(5, 0), pady=(5,0));
+        self.center_x_entry.grid(row=2, column=0, sticky="ew", pady=(2,0), padx=(0, 5))
+
         self.center_y_entry = ttk.Entry(frame, textvariable=self.center_y_var, width=8)
-        self.center_y_entry.grid(row=1, column=3, sticky="ew", pady=(5,0), padx=(0, 5))
+        self.center_y_entry.grid(row=2, column=1, sticky="ew", pady=(2,0), padx=(5, 5))
 
-        ttk.Label(frame, text="Center Z:").grid(row=1, column=4, sticky="w", padx=(5, 0), pady=(5,0));
         self.center_z_entry = ttk.Entry(frame, textvariable=self.center_z_var, width=8)
-        self.center_z_entry.grid(row=1, column=5, sticky="ew", pady=(5,0), padx=(0, 10))
-
-        self.mark_center_button = ttk.Button(frame, text="Mark Current\nas Center", command=self._mark_current_as_center, state=tk.DISABLED)
-        self.mark_center_button.grid(row=0, column=6, rowspan=1, sticky="nsew", pady=(0,2), padx=(5,0))
-
-        self.collision_test_button = ttk.Button(frame, text="Collision\nAvoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED) # Initially disabled until connected
-        self.collision_test_button.grid(row=1, column=6, rowspan=1, sticky="nsew", pady=(2,0), padx=(5,0))
+        self.center_z_entry.grid(row=2, column=2, sticky="ew", pady=(2,0), padx=(5, 5))
         
-        # Row 2: Calibration
-        ttk.Label(frame, text="E-Cal (mm/°):").grid(row=2, column=0, sticky="w", pady=(5,0));
+        self.center_e_entry = ttk.Entry(frame, textvariable=self.center_e_var, width=8)
+        self.center_e_entry.grid(row=2, column=3, sticky="ew", pady=(2,0), padx=(5, 5))
+
         self.e_cal_entry = ttk.Entry(frame, textvariable=self.mm_per_degree_var, width=8, state='readonly')
-        self.e_cal_entry.grid(row=2, column=1, sticky="ew", pady=(5,0), padx=(0, 5))
-        
+        self.e_cal_entry.grid(row=2, column=4, sticky="ew", pady=(2,0), padx=(5, 5))
+
         self.e_cal_lock_var = tk.BooleanVar(value=True)
         def toggle_e_cal():
             state = 'readonly' if self.e_cal_lock_var.get() else 'normal'
@@ -769,123 +794,101 @@ class GCodeSenderGUI:
                 if not messagebox.askyesno("Confirm Unlock", "Are you sure you want to change the rotation ratio? This will affect tilt axis movements and could cause collisions."):
                     self.e_cal_lock_var.set(True)
                     self.e_cal_entry.config(state='readonly')
-                    
-        ttk.Checkbutton(frame, text="Lock", variable=self.e_cal_lock_var, command=toggle_e_cal).grid(row=2, column=2, sticky="w", pady=(5,0))
-        
+
+        ttk.Checkbutton(frame, text="Lock", variable=self.e_cal_lock_var, command=toggle_e_cal).grid(row=2, column=5, sticky="w", pady=(2,0))
+
         # Bind changes in the center entries to update the coordinate displays.
         self.center_x_entry.bind('<FocusOut>', self._on_center_change); self.center_x_entry.bind('<Return>', self._on_center_change)
         self.center_y_entry.bind('<FocusOut>', self._on_center_change); self.center_y_entry.bind('<Return>', self._on_center_change)
         self.center_z_entry.bind('<FocusOut>', self._on_center_change); self.center_z_entry.bind('<Return>', self._on_center_change)
-
+        self.center_e_entry.bind('<FocusOut>', self._on_center_change); self.center_e_entry.bind('<Return>', self._on_center_change)
 
     def create_connection_frame(self, parent):
         """Creates the 'CONNECTION' panel for managing the serial connection."""
-        frame = ttk.LabelFrame(parent, text="CONNECTION", padding="10")
+        self._conn_frame = ttk.LabelFrame(parent, text="CONNECTION", padding="10", style='Grey.TLabelframe')
+        frame = self._conn_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
-        frame.columnconfigure(4, weight=1)
         
+        # Spacer column to push status to the right
+        frame.columnconfigure(6, weight=1)
+        
+        # Row 0
         ttk.Label(frame, text="Port:").grid(row=0, column=0, sticky="w"); 
         self.port_combobox = ttk.Combobox(frame, textvariable=self.port_var, values=self.available_ports, width=15, state="readonly", font=self.FONT_MONO)
         self.port_combobox.grid(row=0, column=1, padx=(0, 5))
         
         ttk.Button(frame, text="Rescan", command=self.rescan_ports, width=7).grid(row=0, column=2, padx=(0, 10))
-        
-        ttk.Label(frame, text="Baud Rate:").grid(row=1, column=0, sticky="w", pady=(5,0)); 
+
+        ttk.Label(frame, text="Baud Rate:").grid(row=0, column=3, sticky="w", padx=(5,0)); 
         self.baud_entry = ttk.Entry(frame, textvariable=self.baud_var, width=10); 
-        self.baud_entry.grid(row=1, column=1, padx=(0, 10), sticky="w")
-        
-        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection, style='Primary.TButton'); 
-        self.connect_button.grid(row=0, column=3, rowspan=2, sticky="ns", padx=(5,0))
+        self.baud_entry.grid(row=0, column=4, padx=(0, 10), sticky="w")
+
+        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection)
+        self.connect_button.grid(row=0, column=5, sticky="w", padx=(5,0))
         
         # The cancel button is only shown during a connection attempt.
         self.cancel_connect_button = ttk.Button(frame, text="Cancel", command=self._cancel_connection_attempt)
         
         # The status indicator "LED" and its text label.
         self.status_indicator = StatusIndicator(frame, self.COLOR_PANEL_BG)
-        self.status_indicator.grid(row=0, column=4, rowspan=2, padx=(10, 0), sticky="w")
+        self.status_indicator.grid(row=0, column=7, padx=(10, 0), sticky="e")
         self.status_label = ttk.Label(frame, textvariable=self.connection_status_var, font=self.FONT_BODY_SMALL, style='Filepath.TLabel'); 
-        self.status_label.grid(row=0, column=5, rowspan=2, padx=(0, 0), sticky="w")
+        self.status_label.grid(row=0, column=8, padx=(0, 0), sticky="w")
         
 
     def create_measurement_frame(self, parent):
         """Creates the 'MEASUREMENT' panel."""
-        frame = ttk.LabelFrame(parent, text="MEASUREMENT", padding="10")
+        self._meas_frame = ttk.LabelFrame(parent, text="MEASUREMENT", padding="10", style='Grey.TLabelframe')
+        frame = self._meas_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         
-        # Connect / Status
-        conn_frame = ttk.Frame(frame, style='Panel.TFrame')
-        conn_frame.pack(fill=tk.X, pady=(0, 5))
+        # Top Row: Connect, IP, Mode, Settling Time
+        top_frame = ttk.Frame(frame, style='Panel.TFrame')
+        top_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.dmm_connect_button = ttk.Button(conn_frame, text="Connect DMMs", command=self.toggle_dmm_connection)
-        self.dmm_connect_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.dmm_connect_button = ttk.Button(top_frame, text="Connect DMMs", command=self.toggle_dmm_connection)
+        self.dmm_connect_button.pack(side=tk.LEFT, padx=(0, 15))
         
-        ttk.Label(conn_frame, textvariable=self.dmm_status_var, style='Filepath.TLabel').pack(side=tk.LEFT)
+        ttk.Label(top_frame, text="IP Prefix:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
+        self.dmm_ip_prefix_entry = ttk.Entry(top_frame, textvariable=self.dmm_ip_prefix_var, width=12, font=self.FONT_MONO)
+        self.dmm_ip_prefix_entry.pack(side=tk.LEFT, padx=(2, 15))
 
-        # IP Prefix Selector
-        ip_frame = ttk.Frame(frame, style='Panel.TFrame')
-        ip_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        ttk.Label(ip_frame, text="IP Prefix:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
-        self.dmm_ip_prefix_entry = ttk.Entry(ip_frame, textvariable=self.dmm_ip_prefix_var, width=15, font=self.FONT_MONO)
-        self.dmm_ip_prefix_entry.pack(side=tk.LEFT, padx=(5, 10))
-
-        # DMM Mode Selector
-        mode_frame = ttk.Frame(frame, style='Panel.TFrame')
-        mode_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        ttk.Label(mode_frame, text="Mode:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
+        ttk.Label(top_frame, text="Mode:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
         self.dmm_mode_combo = ttk.Combobox(
-            mode_frame, textvariable=self.dmm_mode_var,
+            top_frame, textvariable=self.dmm_mode_var,
             values=list(DMM_MODES.keys()), state="readonly",
-            width=15, font=self.FONT_MONO
+            width=12, font=self.FONT_MONO
         )
-        self.dmm_mode_combo.pack(side=tk.LEFT, padx=(5, 10))
+        self.dmm_mode_combo.pack(side=tk.LEFT, padx=(2, 15))
         self.dmm_mode_combo.bind('<<ComboboxSelected>>', self._on_dmm_mode_change)
 
-        # Auto Measure Toggle
-        opts_frame = ttk.Frame(frame, style='Panel.TFrame')
-        opts_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        self.auto_measure_check = ttk.Checkbutton(opts_frame, text="Auto-Measure on Move", variable=self.auto_measure_enabled, command=self._on_auto_measure_toggle)
-        self.auto_measure_check.pack(side=tk.LEFT, padx=(0, 15))
-        
-        # Logging Frame
-        log_frame = ttk.Frame(frame, style='Panel.TFrame')
-        log_frame.pack(fill=tk.X, pady=(0, 5))
-        
-        self.log_check = ttk.Checkbutton(log_frame, text="Log to CSV", variable=self.log_measurements_enabled)
-        self.log_check.pack(side=tk.LEFT)
-        
-        self.log_path_entry = ttk.Entry(log_frame, textvariable=self.log_filepath_var, width=15, font=self.FONT_BODY_SMALL)
-        self.log_path_entry.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
-        
-        self.browse_log_btn = ttk.Button(log_frame, text="...", width=3, command=self.select_log_file)
-        self.browse_log_btn.pack(side=tk.LEFT)
+        ttk.Label(top_frame, text="Settling Time (s):", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
+        ttk.Entry(top_frame, textvariable=self.pre_measure_delay_var, width=4, font=self.FONT_MONO).pack(side=tk.LEFT, padx=(2, 0))
 
-        # Settings Frame (Stability)
-        settings_frame = ttk.Frame(frame, style='Panel.TFrame')
-        settings_frame.pack(fill=tk.X, pady=(0, 5))
+        self.auto_measure_check = ttk.Checkbutton(top_frame, text="Auto-Measure on Move", variable=self.auto_measure_enabled, command=self._on_auto_measure_toggle)
+        self.auto_measure_check.pack(side=tk.LEFT, padx=(15, 0))
+
+        # Mid Row: Logging
+        mid_frame = ttk.Frame(frame, style='Panel.TFrame')
+        mid_frame.pack(fill=tk.X, pady=(0, 10))
         
-        # Row 1: Threshold & Retries
-        ttk.Label(settings_frame, text="Stability (%):", font=self.FONT_BODY_SMALL).grid(row=0, column=0, sticky="w")
-        ttk.Entry(settings_frame, textvariable=self.stability_threshold_var, width=4, font=self.FONT_MONO).grid(row=0, column=1, sticky="w", padx=5)
+        self.log_check = ttk.Checkbutton(mid_frame, text="Log to CSV:", variable=self.log_measurements_enabled)
+        self.log_check.grid(row=0, column=0, sticky="w")
         
-        ttk.Label(settings_frame, text="Max Retries:", font=self.FONT_BODY_SMALL).grid(row=0, column=2, sticky="w", padx=(10, 0))
-        ttk.Entry(settings_frame, textvariable=self.max_retries_var, width=4, font=self.FONT_MONO).grid(row=0, column=3, sticky="w", padx=5)
+        self.log_path_entry = ttk.Entry(mid_frame, textvariable=self.log_filepath_var, font=self.FONT_BODY_SMALL, state='readonly')
+        self.log_path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
+        
+        self.browse_log_btn = ttk.Button(mid_frame, text="Select Data File...", command=self.select_log_file)
+        self.browse_log_btn.grid(row=0, column=2, sticky="e")
+        
+        mid_frame.columnconfigure(1, weight=1)
 
-        # Row 2: Window & Delay
-        ttk.Label(settings_frame, text="Measurements per Point:", font=self.FONT_BODY_SMALL).grid(row=1, column=0, sticky="w", pady=(5,0))
-        ttk.Entry(settings_frame, textvariable=self.measurements_per_point_var, width=4, font=self.FONT_MONO).grid(row=1, column=1, sticky="w", padx=5, pady=(5,0))
-
-        ttk.Label(settings_frame, text="Stabilizing Delay (s):", font=self.FONT_BODY_SMALL).grid(row=1, column=2, sticky="w", padx=(10, 0), pady=(5,0))
-        ttk.Entry(settings_frame, textvariable=self.pre_measure_delay_var, width=4, font=self.FONT_MONO).grid(row=1, column=3, sticky="w", padx=5, pady=(5,0))
-
-        # Manual Trigger & Last Reading
+        # Control Row: Manual Trigger & Last Reading
         ctrl_frame = ttk.Frame(frame, style='Panel.TFrame')
-        ctrl_frame.pack(fill=tk.X, pady=(5, 0))
+        ctrl_frame.pack(fill=tk.X)
         
-        self.measure_button = ttk.Button(ctrl_frame, text="Measure Now", command=self.trigger_manual_measurement, state=tk.DISABLED)
-        self.measure_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.measure_button = ttk.Button(ctrl_frame, text="▶ Measure Now", command=self.trigger_manual_measurement, state=tk.DISABLED, width=25)
+        self.measure_button.pack(side=tk.LEFT, padx=(0, 15))
         
         ttk.Label(ctrl_frame, textvariable=self.last_measurement_var, font=self.FONT_MONO).pack(side=tk.LEFT)
 
@@ -925,35 +928,42 @@ class GCodeSenderGUI:
 
 
     def create_control_frame(self, parent):
-        """Creates the 'EXECUTION CONTROL' panel with Start, Pause, and Stop buttons."""
-        frame = ttk.LabelFrame(parent, text="EXECUTION CONTROL", padding=10)
+        """Creates the 'EXECUTION CONTROL' panel with file picker, Start/Pause/Stop, and progress."""
+        self._ctrl_frame = ttk.LabelFrame(parent, text="EXECUTION CONTROL", padding=10, style='Grey.TLabelframe')
+        frame = self._ctrl_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
-        
-        self.start_button = ttk.Button(frame, text="Start Sending", command=self.start_sending, state=tk.DISABLED, style='Primary.TButton'); 
+        frame.columnconfigure(1, weight=1)
+
+        # --- File Picker Row (moved from SETUP) ---
+        file_row = ttk.Frame(frame, style='Panel.TFrame')
+        file_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(file_row, text="Select G-Code File", command=self.select_file).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(file_row, textvariable=self.file_path_var, wraplength=250, style='Filepath.TLabel').pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # --- Action Buttons Row ---
+        btn_row = ttk.Frame(frame, style='Panel.TFrame')
+        btn_row.pack(fill=tk.X)
+
+        self.start_button = ttk.Button(btn_row, text="Start Sending", command=self.start_sending, state=tk.DISABLED, style='Primary.TButton')
         self.start_button.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.pause_resume_button = ttk.Button(frame, text="Pause", command=self.toggle_pause_resume, state=tk.DISABLED); 
+
+        self.pause_resume_button = ttk.Button(btn_row, text="Pause", command=self.toggle_pause_resume, state=tk.DISABLED)
         self.pause_resume_button.pack(side=tk.LEFT, padx=(0, 10))
-        
+
         # M112: A hard stop that requires a printer reset.
-        self.stop_button = ttk.Button(frame, text="EMERGENCY STOP", command=self.emergency_stop, state=tk.NORMAL, style='Danger.TButton'); 
+        self.stop_button = ttk.Button(btn_row, text="EMERGENCY STOP", command=self.emergency_stop, state=tk.NORMAL, style='Danger.TButton')
         self.stop_button.pack(side=tk.LEFT)
-        
+
         # M410: A soft stop that finishes the current move then halts.
-        self.quick_stop_button = ttk.Button(frame, text="QUICK STOP", command=self.quick_stop, state=tk.NORMAL, style='Amber.TButton')
+        self.quick_stop_button = ttk.Button(btn_row, text="QUICK STOP", command=self.quick_stop, state=tk.NORMAL, style='Amber.TButton')
         self.quick_stop_button.pack(side=tk.LEFT, padx=(10, 0))
 
-    def create_progress_frame(self, parent):
-        """Creates the 'PROGRESS' panel with a progress bar and label."""
-        frame = ttk.LabelFrame(parent, text="PROGRESS", padding="10")
-        frame.pack(fill=tk.X, pady=(0, 10), padx=5)
-        frame.columnconfigure(0, weight=1)
-        
-        self.progress_label = ttk.Label(frame, textvariable=self.progress_label_var, font=self.FONT_MONO, foreground=self.COLOR_TEXT_SECONDARY); 
-        self.progress_label.grid(row=0, column=0, sticky="ew", padx=5)
-        
-        self.progress_bar = ttk.Progressbar(frame, orient=tk.HORIZONTAL, length=300, mode='determinate', variable=self.progress_var); 
-        self.progress_bar.grid(row=1, column=0, sticky="ew", padx=5, pady=(5,0))
+        # --- Progress (merged from standalone PROGRESS section) ---
+        self.progress_label = ttk.Label(frame, textvariable=self.progress_label_var, font=self.FONT_MONO, foreground=self.COLOR_TEXT_SECONDARY)
+        self.progress_label.pack(fill=tk.X, padx=2, pady=(8, 2))
+
+        self.progress_bar = ttk.Progressbar(frame, orient=tk.HORIZONTAL, mode='determinate', variable=self.progress_var)
+        self.progress_bar.pack(fill=tk.X, padx=2)
 
     def _toggle_2d_plot_button(self):
         """Toggles the state of the 2D plot and updates the button style."""
@@ -1290,6 +1300,13 @@ class GCodeSenderGUI:
         )
         self.toggle_3d_button.pack(side=tk.LEFT)
 
+        self.launch_visualizer_button = ttk.Button(
+            control_bar,
+            text="Launch Data Visualizer",
+            command=self.launch_visualizer
+        )
+        self.launch_visualizer_button.pack(side=tk.LEFT, padx=(10, 0))
+
         # --- Container for the plot or the "disabled" message ---
         self.plot_container_frame = ttk.Frame(parent, style="Panel.TFrame")
         self.plot_container_frame.grid(row=1, column=0, sticky="nsew")
@@ -1299,6 +1316,18 @@ class GCodeSenderGUI:
         # Set the initial state
         self._update_3d_plot_button_style()
         self._update_3d_plot_visibility()
+
+    def launch_visualizer(self):
+        """Opens visualizer.html in the system default web browser."""
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        visualizer_path = os.path.join(script_dir, "visualizer.html")
+        if os.path.exists(visualizer_path):
+            webbrowser.open_new_tab(f"file:///{visualizer_path}")
+        else:
+            messagebox.showerror(
+                "File Not Found",
+                f"Could not find visualizer.html at:\n{visualizer_path}"
+            )
 
     def _toggle_3d_plot_button(self):
         """Toggles the state of the 3D plot and updates the button style."""
@@ -1989,8 +2018,9 @@ class GCodeSenderGUI:
         
         # --- Update GUI to "Connecting" state ---
         self.connect_button.config(state=tk.DISABLED)
-        self.cancel_connect_button.grid(row=0, column=6, rowspan=2, sticky="ns", padx=(5,0))
+        self.cancel_connect_button.grid(row=0, column=5, sticky="w", padx=(5,0))
         self.cancel_connect_button.config(state=tk.NORMAL)
+        self.connect_button.grid_remove() # Hide the connect button while cancel is shown
         self.port_combobox.config(state=tk.DISABLED)
         self.baud_entry.config(state=tk.DISABLED)
         
@@ -2015,8 +2045,9 @@ class GCodeSenderGUI:
         self.log_message("Connection attempt cancelled by user.", "WARN")
         self.cancel_connect_event.set()
         
-        # Hide the cancel button and update the status display.
+        # Hide the cancel button, restore connect button, and update the status display.
         self.cancel_connect_button.grid_remove()
+        self.connect_button.grid()
         self.cancel_connect_button.config(state=tk.DISABLED)
         
         self.connection_status_var.set("Cancelling...")
@@ -3570,7 +3601,7 @@ class GCodeSenderGUI:
                                 if self.dmm_group:
                                     try:
                                         # Use the new stability method
-                                        vals = self._measure_with_stability()
+                                        vals = self._take_measurement()
                                         
                                         self.message_queue.put(("MEASUREMENT_RESULT", vals))
                                         if self.log_measurements_enabled.get():
@@ -3698,6 +3729,7 @@ class GCodeSenderGUI:
                         self.target_abs_x, self.target_abs_y, self.target_abs_z = self.PRINTER_BOUNDS['x_min'], self.PRINTER_BOUNDS['y_min'], self.PRINTER_BOUNDS['z_min']
                         self.log_message("Position unknown, assuming origin (0, 0, 0).", "WARN")
                     self._update_all_displays()
+                    self._update_section_borders()
                 
                 elif msg_type == "CONNECT_FAIL":
                     err_msg = msg_content
@@ -3718,6 +3750,7 @@ class GCodeSenderGUI:
                         self.baud_entry.config(state=tk.NORMAL)
                     if hasattr(self, 'cancel_connect_button'):
                         self.cancel_connect_button.grid_remove()
+                        self.connect_button.grid()
                         self.cancel_connect_button.config(state=tk.DISABLED)
                 
                 elif msg_type == "FILE_SEND_FINISHED":
@@ -3775,6 +3808,7 @@ class GCodeSenderGUI:
                     self.dmm_connect_button.config(text="Disconnect DMMs", state=tk.NORMAL)
                     self.measure_button.config(state=tk.NORMAL)
                     self.log_message("DMMs connected successfully.", "SUCCESS")
+                    self._update_section_borders()
 
                 elif msg_type == "DMM_FAIL":
                     self.is_dmm_connected = False
@@ -3782,6 +3816,7 @@ class GCodeSenderGUI:
                     self.dmm_connect_button.config(text="Connect DMMs", state=tk.NORMAL)
                     self.measure_button.config(state=tk.DISABLED)
                     self.log_message(f"DMM Error: {msg_content}", "ERROR")
+                    self._update_section_borders()
 
                 elif msg_type == "MEASUREMENT_RESULT":
                     vals = msg_content 
@@ -3896,6 +3931,25 @@ class GCodeSenderGUI:
         
     # --- New Coordinate Control Methods ---
     
+    def _update_section_borders(self):
+        """Updates the LabelFrame border colour to green when each section's setup condition is met."""
+        GREEN = 'Green.TLabelframe'
+        GREY  = 'Grey.TLabelframe'
+
+        # CONNECTION — green once printer is connected
+        if hasattr(self, '_conn_frame'):
+            self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else GREY)
+
+        # MEASUREMENT — green when DMM connected AND (Log to CSV off OR file path set)
+        if hasattr(self, '_meas_frame'):
+            log_ok = not self.log_measurements_enabled.get() or bool(self.log_filepath_var.get().strip())
+            self._meas_frame.configure(style=GREEN if (self.is_dmm_connected and log_ok) else GREY)
+
+        # SETUP — green when center has been marked AND collision test completed
+        if hasattr(self, '_setup_frame'):
+            setup_ok = self.center_marked and self.rotation_crash_test_complete
+            self._setup_frame.configure(style=GREEN if setup_ok else GREY)
+
     def _mark_current_as_center(self):
         """
         Sets the user-defined 'Center' coordinates to the printer's last known position.
@@ -3912,9 +3966,15 @@ class GCodeSenderGUI:
             self.center_x_var.set(f"{self.last_cmd_abs_x:.2f}")
             self.center_y_var.set(f"{self.last_cmd_abs_y:.2f}")
             self.center_z_var.set(f"{self.last_cmd_abs_z:.2f}")
-            self.log_message(f"New center marked at: X={self.last_cmd_abs_x:.2f}, Y={self.last_cmd_abs_y:.2f}, Z={self.last_cmd_abs_z:.2f}", "SUCCESS")
+            if self.last_cmd_abs_e is not None:
+                self.center_e_var.set(f"{self.last_cmd_abs_e:.2f}")
+            
+            e_str = f", E={self.last_cmd_abs_e:.2f}" if self.last_cmd_abs_e is not None else ""
+            self.log_message(f"New center marked at: X={self.last_cmd_abs_x:.2f}, Y={self.last_cmd_abs_y:.2f}, Z={self.last_cmd_abs_z:.2f}{e_str}", "SUCCESS")
+            self.center_marked = True
             # Trigger the same logic as if the user changed the entry fields manually.
             self._on_center_change()
+            self._update_section_borders()
         except Exception as e:
              self.log_message(f"Error marking center: {e}", "ERROR")
 
@@ -3971,6 +4031,7 @@ class GCodeSenderGUI:
             center_x = float(self.center_x_var.get())
             center_y = float(self.center_y_var.get())
             center_z = float(self.center_z_var.get())
+            center_e = float(self.center_e_var.get())
         except ValueError:
              # If center coords are invalid, just skip the update to avoid errors.
              return 
@@ -4000,7 +4061,10 @@ class GCodeSenderGUI:
                 self.footer_coords_var.set("X: N/A  Y: N/A  Z: N/A")
 
         if self.last_cmd_abs_e is not None:
-            self.last_cmd_e_display_var.set(f"{self.last_cmd_abs_e:.2f}")
+            if mode == "absolute":
+                self.last_cmd_e_display_var.set(f"{self.last_cmd_abs_e:.2f}")
+            else:
+                self.last_cmd_e_display_var.set(f"{self.last_cmd_abs_e - center_e:.2f}")
         else:
             self.last_cmd_e_display_var.set("N/A")
 
@@ -4009,12 +4073,12 @@ class GCodeSenderGUI:
             self.goto_x_display_var.set(f"{self.target_abs_x:.2f}")
             self.goto_y_display_var.set(f"{self.target_abs_y:.2f}")
             self.goto_z_display_var.set(f"{self.target_abs_z:.2f}")
+            self.goto_e_display_var.set(f"{self.target_abs_e:.2f}")
         else: # "relative"
             self.goto_x_display_var.set(f"{self.target_abs_x - center_x:.2f}")
             self.goto_y_display_var.set(f"{self.target_abs_y - center_y:.2f}")
             self.goto_z_display_var.set(f"{self.target_abs_z - center_z:.2f}")
-        
-        self.goto_e_display_var.set(f"{self.target_abs_e:.2f}")
+            self.goto_e_display_var.set(f"{self.target_abs_e - center_e:.2f}")
 
         # --- Redraw Canvases ---
         # This is necessary to move the position markers.
@@ -4145,82 +4209,23 @@ class GCodeSenderGUI:
         except Exception as e:
             self.queue_message(f"Measurement Error: {e}", "ERROR")
 
-    def _measure_with_stability(self):
+    def _take_measurement(self):
         """
-        Takes readings until stability criteria are met or retries exhausted.
-        Returns the final averaged list of values.
+        Takes a reading after the specified settling time delay.
+        Returns the final averaged list of values returned directly by the DMM.
         """
         if not self.dmm_group: return []
 
-        threshold_pct = self.stability_threshold_var.get()
-        max_retries = self.max_retries_var.get()
-        measurements_per_point = self.measurements_per_point_var.get()
         pre_delay = self.pre_measure_delay_var.get()
-        
-        if measurements_per_point < 2: measurements_per_point = 2 # Minimum for std dev
 
         # 1. Pre-Measure Delay
         if pre_delay > 0:
-            self.queue_message(f"Stabilizing... ({pre_delay}s)")
+            self.queue_message(f"Settling... ({pre_delay}s)")
             time.sleep(pre_delay)
 
-        # 2. Fill initial window
-        history = []
-        for _ in range(measurements_per_point):
-             self.dmm_group.trigger()
-             history.append(self.dmm_group.read())
-        
-        attempts = 0
-        stable = False
-        
-        while attempts < max_retries:
-            # Transpose history to get lists of values per DMM channel
-            channels = list(zip(*history))
-            
-            max_dev = 0.0
-            for channel_data in channels:
-                if not channel_data: continue
-                
-                mean = sum(channel_data) / len(channel_data)
-                if mean == 0: continue 
-                
-                variance = sum([((x - mean) ** 2) for x in channel_data]) / len(channel_data)
-                std_dev = variance ** 0.5
-                
-                pct_dev = (std_dev / abs(mean)) * 100
-                if pct_dev > max_dev:
-                    max_dev = pct_dev
-
-            self.queue_message(f"Stability Check: Max Dev = {max_dev:.3f}% (Threshold: {threshold_pct}%)")
-            
-            if max_dev <= threshold_pct:
-                stable = True
-                break
-            
-            # Not stable, take another reading
-            self.dmm_group.trigger()
-            new_reading = self.dmm_group.read()
-            
-            # Maintain sliding window size
-            history.append(new_reading)
-            while len(history) > measurements_per_point:
-                history.pop(0)
-            
-            attempts += 1
-            time.sleep(0.2) 
-
-        if not stable:
-            self.queue_message("Warning: Stability threshold not met. Proceeding with last reading.", "WARN")
-        else:
-             self.queue_message("Readings stabilized.", "SUCCESS")
-
-        # Return the average of the current history window
-        final_avg = []
-        if history:
-            final_channels = list(zip(*history))
-            for ch in final_channels:
-                final_avg.append(sum(ch) / len(ch))
-        return final_avg
+        # 2. Trigger and Read
+        self.dmm_group.trigger()
+        return self.dmm_group.read()
 
     def select_log_file(self):
         """Opens a file dialog to choose the CSV log file."""
@@ -4254,7 +4259,7 @@ class GCodeSenderGUI:
                 # Write header if new file
                 if not file_exists:
                     mode = self.dmm_mode_var.get()
-                    headers = ["Timestamp", "X", "Y", "Z"] + [f"{d[2]} ({mode})" for d in DMM_CONFIG]
+                    headers = ["Timestamp", "X", "Y", "Z", "E"] + [f"{d[2]} ({mode})" for d in DMM_CONFIG]
                     writer.writerow(headers)
                     self.queue_message(f"Created log file: {filepath}", "SUCCESS")
 
@@ -4262,13 +4267,15 @@ class GCodeSenderGUI:
                     log_x = coords.get('x', 0.0)
                     log_y = coords.get('y', 0.0)
                     log_z = coords.get('z', 0.0)
+                    log_e = coords.get('e', 0.0)
                 else:
                     # Get current position (use last known)
                     log_x = self.last_cmd_abs_x if self.last_cmd_abs_x is not None else 0.0
                     log_y = self.last_cmd_abs_y if self.last_cmd_abs_y is not None else 0.0
                     log_z = self.last_cmd_abs_z if self.last_cmd_abs_z is not None else 0.0
+                    log_e = self.last_cmd_abs_e if self.last_cmd_abs_e is not None else 0.0
                 
-                row = [datetime.now().isoformat(), log_x, log_y, log_z] + values
+                row = [datetime.now().isoformat(), log_x, log_y, log_z, log_e] + values
                 writer.writerow(row)
         except Exception as log_err:
             self.queue_message(f"Log Write Error: {log_err}", "ERROR")
@@ -4454,7 +4461,7 @@ class GCodeSenderGUI:
                 self.queue_message("Auto-Measure: Measuring at Min Tilt...")
                 if self.dmm_group:
                     try:
-                        vals = self._measure_with_stability()
+                        vals = self._take_measurement()
                         self.message_queue.put(("MEASUREMENT_RESULT", vals))
                         if self.log_measurements_enabled.get():
                             self._log_measurement_to_file(vals, coords={'x': cx, 'y': cy, 'z': min_z, 'e': min_e})
@@ -4473,6 +4480,7 @@ class GCodeSenderGUI:
             if not self._wait_for_ok(timeout=30): raise Exception("Return Center timeout")
 
             self.rotation_crash_test_complete = True
+            self._update_section_borders()
             self.queue_message("Collision Test Complete.", "SUCCESS")
             
             # Show completed popup
