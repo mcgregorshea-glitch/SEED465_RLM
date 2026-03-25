@@ -4128,18 +4128,8 @@ class GCodeSenderGUI:
                 self.target_abs_z = max(self.PRINTER_BOUNDS['z_min'], min(self.PRINTER_BOUNDS['z_max'], new_abs_z))
             if val_e_str:
                 val_e = float(val_e_str)
-                # E is Rotation, Center usually doesn't apply, but logic allows relative E if needed.
-                # Assuming E is always absolute angle for "Set E" in this context, or relative if mode is relative.
-                # Let's treat E relative to 0 if mode is relative, effectively additive.
-                new_abs_e = val_e if mode == "absolute" else (val_e + self.target_abs_e) # Relative adds to current target? Or current pos?
-                # Standard behavior for UI input is usually "Set Target to X".
-                # If relative mode is on, input "10" usually means "Current + 10".
-                # BUT here, this function sets the TARGET.
-                # Let's stick to the pattern: Absolute input sets Absolute Target. Relative input adds to Center offset.
-                # Since E doesn't have a "Center" defined in UI, Relative Mode for E is ambiguous.
-                # Let's assume "Set E" is always absolute angle for simplicity, or add to current target if relative?
-                # Re-reading X/Y logic: "val_x + center_x". This implies the input is a coordinate relative to WCS origin.
-                # For E, WCS origin is 0. So Relative Input = Absolute Input.
+                center_e = float(self.center_e_var.get())
+                new_abs_e = val_e + center_e if mode == "relative" else val_e
                 self.target_abs_e = max(self.PRINTER_BOUNDS['e_min'], min(self.PRINTER_BOUNDS['e_max'], new_abs_e))
                 
         except ValueError:
