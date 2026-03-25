@@ -719,6 +719,9 @@ class GCodeSenderGUI:
         # Globally remove focus from comboboxes after selection to prevent text highlighting
         self.root.bind_class('TCombobox', '<<ComboboxSelected>>', lambda e: self.root.focus_set())
         
+        # Bind global keyboard shortcuts for jogging
+        self.root.bind('<Key>', self._handle_key_press)
+        
 
 
     # --- GUI Creation Methods ---
@@ -938,6 +941,7 @@ class GCodeSenderGUI:
         file_row = ttk.Frame(frame, style='Panel.TFrame')
         file_row.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(file_row, text="Select G-Code File", command=self.select_file).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(file_row, text="Clear", command=self.clear_file).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(file_row, textvariable=self.file_path_var, wraplength=250, style='Filepath.TLabel').pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # --- Action Buttons Row ---
@@ -1085,6 +1089,12 @@ class GCodeSenderGUI:
         # Left (-90)
         ttk.Button(self.e_container, text="-90°", width=4, style=btn_style, command=lambda: set_e(-90)).place(relx=0.02, rely=0.5, anchor='w')
 
+        # --- "Mark Tilt as Level" button below the E gauge ---
+        ttk.Button(
+            self.canvas_frame, text="Mark Tilt as Level (0°)",
+            command=self._mark_tilt_as_level
+        ).grid(row=1, column=3, pady=(4, 0), sticky="ew")
+
         # --- 2D Plot Toggle ---
         self.toggle_2d_button = ttk.Button(
             frame,
@@ -1155,6 +1165,9 @@ class GCodeSenderGUI:
         self.rot_step_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_step_var, width=5); self.rot_step_entry.pack(side=tk.LEFT, padx=(0, 10))
         ttk.Label(jog_params_frame, text="Rot Speed (deg/min):").pack(side=tk.LEFT, padx=(0, 5))
         self.rot_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_feedrate_var, width=6); self.rot_feedrate_entry.pack(side=tk.LEFT)
+
+        # Quick 'Mark as Center' shortcut
+        ttk.Button(jog_params_frame, text="● Mark as Center", command=self._mark_current_as_center).pack(side=tk.LEFT, padx=(20, 0))
         
         self.manual_buttons = [self.home_button, self.jog_x_neg, self.jog_x_pos, self.jog_y_neg, self.jog_y_pos, self.jog_z_neg, self.jog_z_pos, self.jog_e_pos, self.jog_e_neg]
         self.manual_entries = [self.jog_step_entry, self.jog_feedrate_entry, self.rot_step_entry, self.rot_feedrate_entry]
@@ -1749,6 +1762,39 @@ class GCodeSenderGUI:
         # Enable the start button if we are connected and have a valid file.
         if self.serial_connection and self.processed_gcode:
             self.start_button.config(state=tk.NORMAL)
+
+    def clear_file(self):
+        """Clears the currently loaded G-code program."""
+        self.gcode_filepath = None
+        self.processed_gcode = []
+        self.toolpath_by_layer = {}
+        self.move_to_layer_map = []
+        self.ordered_z_values = []
+        self.completed_move_count = 0
+        self._plot_cache_valid = False
+        self.rotation_crash_test_complete = False
+        
+        self.file_path_var.set("No file selected.")
+        self.header_file_var.set("NONE")
+        self.progress_var.set(0.0)
+        self.progress_label_var.set("0 / 0 (0%)")
+        self.start_button.config(state=tk.DISABLED)
+        
+        # Invalidate any cached plots
+        self._invalidate_all_plot_caches()
+        
+        # Clear the matplotlib 3D plotting canvas
+        if hasattr(self, 'ax_3d') and self.ax_3d is not None:
+            self.ax_3d.clear()
+            self.ax_3d.set_axis_off()
+            if hasattr(self, 'canvas_3d') and self.canvas_3d is not None:
+                self.canvas_3d.draw()
+                
+        # The XY/Z/E canvases are refreshed automatically by _update_all_displays calling their draw methods, 
+        # which will wipe lines if `processed_gcode` is empty.
+            
+        self.log_message("Cleared loaded G-code program.")
+        self._update_all_displays()
 
     def _apply_e_conversion(self, command):
         """
@@ -2795,6 +2841,75 @@ class GCodeSenderGUI:
         
         # The _send_manual_command method handles all state checks.
         self._send_manual_command(command)
+
+    def _handle_key_press(self, event):
+        """Processes global keyboard inputs for jogging and step size adjustments."""
+        # Prevent jogging when typing in input fields
+        if isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox, ttk.Spinbox)):
+            return
+
+        # Check if connected and controls are actually enabled
+        if not self.serial_connection or self.is_manual_command_running or self.is_sending:
+            return
+
+        # Handle arrow keys first via keysym
+        keysym = event.keysym
+        if keysym == 'Left':
+            self._jog('E', -1)
+            return
+        elif keysym == 'Right':
+            self._jog('E', 1)
+            return
+        elif keysym in ('Up', 'Down'):
+            self._cycle_step_size('ROT', 1 if keysym == 'Up' else -1)
+            return
+        
+        # Handle characters
+        char = event.char.lower()
+        if not char:
+            return
+
+        if char == 'w':
+            self._jog('Y', 1)
+        elif char == 's':
+            self._jog('Y', -1)
+        elif char == 'a':
+            self._jog('X', -1)
+        elif char == 'd':
+            self._jog('X', 1)
+        elif char == 'q':
+            self._jog('Z', 1)
+        elif char == 'e':
+            self._jog('Z', -1)
+        elif char == 'r':
+            self._cycle_step_size('XYZ', 1)
+        elif char == 'f':
+            self._cycle_step_size('XYZ', -1)
+
+    def _cycle_step_size(self, axis_type, direction):
+        """Cycles through predefined step sizes for manual jogging."""
+        xyz_steps = [0.1, 1.0, 5.0, 10.0, 50.0, 100.0]
+        rot_steps = [1.0, 5.0, 10.0, 45.0, 90.0]
+        
+        if axis_type == 'XYZ':
+            try:
+                current = float(self.jog_step_var.get())
+            except ValueError:
+                current = 10.0
+            steps = xyz_steps
+            var = self.jog_step_var
+        else:
+            try:
+                current = float(self.rotation_step_var.get())
+            except ValueError:
+                current = 5.0
+            steps = rot_steps
+            var = self.rotation_step_var
+            
+        # Find closest matching step size
+        closest_idx = min(range(len(steps)), key=lambda i: abs(steps[i] - current))
+        new_idx = max(0, min(len(steps) - 1, closest_idx + direction))
+        var.set(str(steps[new_idx]))
 
     def _jog(self, axis, direction):
         """
@@ -3978,6 +4093,22 @@ class GCodeSenderGUI:
         except Exception as e:
              self.log_message(f"Error marking center: {e}", "ERROR")
 
+    def _mark_tilt_as_level(self):
+        """
+        Sets the 'Center E' (tilt axis origin) to the printer's current tilt position.
+        This makes the current tilt angle read as 0° in relative mode.
+        """
+        if self.last_cmd_abs_e is None:
+            self.log_message("Cannot mark tilt level: No known E position.", "WARN")
+            messagebox.showwarning("Mark Level Failed", "Cannot mark tilt level.\nNo known tilt position.\nTry moving the printer first.")
+            return
+        try:
+            self.center_e_var.set(f"{self.last_cmd_abs_e:.2f}")
+            self.log_message(f"Tilt level marked: E={self.last_cmd_abs_e:.2f} is now 0°", "SUCCESS")
+            self._on_center_change()
+        except Exception as e:
+            self.log_message(f"Error marking tilt level: {e}", "ERROR")
+
     def _on_center_change(self, event=None):
         """
         Callback for when the user manually changes the Center coordinate entries.
@@ -4472,6 +4603,11 @@ class GCodeSenderGUI:
             self.rotation_crash_test_complete = True
             self._update_section_borders()
             self.queue_message("Collision Test Complete.", "SUCCESS")
+            
+            # Request explicit position polling now that printer is back.
+            if self.serial_connection:
+                self.queue_message("Polling for current position...")
+                self.serial_connection.write(b"M114\n")
             
             # Show completed popup
             self.root.after(0, lambda: messagebox.showinfo("Test Completed", "Collision Avoidance Test Successfully Completed!\n\nReturning to 0°."))
