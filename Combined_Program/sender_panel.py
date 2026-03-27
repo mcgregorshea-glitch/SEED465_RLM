@@ -4690,6 +4690,7 @@ class GCodeSenderGUI:
             
             if not found_e:
                 update_status("No rotation (E) found in G-code. Skipping rotation test.")
+                self.rotation_crash_test_complete = True  # Trivially passed — no rotation in file
             else:
                 update_status(f"Test Range: E{min_e:.1f}° to E{max_e:.1f}°")
 
@@ -4739,7 +4740,13 @@ class GCodeSenderGUI:
             if not self._wait_for_ok(timeout=60): raise Exception("Home Z timeout")
 
             if found_e:
-                # Step 3: Move to Max E slowly
+                # Step 3: Move to Center X, Y, Z before tilting
+                update_status(f"Moving to Center XYZ ({cx}, {cy}, {cz}) before tilt...")
+                cmd = f"G90\nG1 X{cx} Y{cy} Z{cz} F{speed_xy}\nM400\n"
+                self.serial_connection.write(cmd.encode('utf-8'))
+                if not self._wait_for_ok(timeout=30): raise Exception("Move to Center XYZ before tilt timeout")
+
+                # Step 4: Tilt to Max E slowly
                 update_status(f"Tilting to Max ({max_e:.1f}°)...")
                 cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed_e}\nM400\n")
                 self.serial_connection.write(cmd.encode('utf-8'))
