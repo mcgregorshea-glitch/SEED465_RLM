@@ -68,6 +68,11 @@ class PatternGeneratorGUI:
     preview_canvas: tk.Canvas
     
     on_send_to_sender: Any
+    send_button: ttk.Button
+    generate_button: ttk.Button
+    _spinner_index: int
+    _spinner_chars: list
+    _spinner_after_id: str
 
     def __init__(self, parent_frame):
         """Initialize all widgets inside the given frame"""
@@ -1381,6 +1386,34 @@ class PatternGeneratorGUI:
 
     # ===== NEW: FILE GENERATION ROUTER =====
     
+    def _animate_spinner(self):
+        """Cycles the 'Working...' animation on the send button while loading."""
+        if not hasattr(self, '_spinner_index'):
+            return
+        chars = self._spinner_chars
+        c = chars[self._spinner_index % len(chars)]
+        try:
+            self.send_button.config(text=f"{c}  Working...")
+        except Exception:
+            return  # Widget destroyed
+        self._spinner_index += 1
+        self._spinner_after_id = self.root.after(150, self._animate_spinner)
+
+    def _restore_send_button(self):
+        """Restores the send button to its normal state after loading completes."""
+        if hasattr(self, '_spinner_after_id'):
+            try:
+                self.root.after_cancel(self._spinner_after_id)
+            except Exception:
+                pass
+        if hasattr(self, '_spinner_index'):
+            del self._spinner_index
+        try:
+            self.send_button.config(state='normal', text="Load to Sender")
+            self.generate_button.config(state='normal')
+        except Exception:
+            pass
+
     def _start_generation_process(self, send_to_sender=False):
         """
         NEW: Called by the "Generate File" buttons.
@@ -1423,9 +1456,22 @@ class PatternGeneratorGUI:
         if send_to_sender:
             import tempfile
             import os
+            import threading
             temp_dir = tempfile.gettempdir()
             fname = os.path.join(temp_dir, f"SEED_AutoSend_{name}{ts}.gcode")
-            self._generate_gcode_file(params, total_points, fname, send_to_sender=True)
+            # Show loading state on button
+            self.send_button.config(state='disabled', text="Working...")
+            self.generate_button.config(state='disabled')
+            self._spinner_index = 0
+            self._spinner_chars = ['\u25dc', '\u25dd', '\u25de', '\u25df']  # ◜◝◞◟
+            self._animate_spinner()
+            def _do_generate():
+                try:
+                    self._generate_gcode_file(params, total_points, fname, send_to_sender=True)
+                finally:
+                    # Restore button on main thread
+                    self.root.after(0, self._restore_send_button)
+            threading.Thread(target=_do_generate, daemon=True).start()
             return
         
         if format_choice == "gcode":

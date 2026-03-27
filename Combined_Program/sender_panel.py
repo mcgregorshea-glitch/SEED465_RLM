@@ -738,6 +738,8 @@ class GCodeSenderGUI:
         # Perform an initial update of all display labels and canvases.
         self.root.after(150, self._update_all_displays)
         
+        # --- Global Key Bindings ---
+        self.root.bind('<Escape>', lambda e: self.emergency_stop())
         # Globally remove focus from comboboxes after selection to prevent text highlighting
         self.root.bind_class('TCombobox', '<<ComboboxSelected>>', lambda e: self.root.focus_set())
         
@@ -4613,7 +4615,7 @@ class GCodeSenderGUI:
                                        bg=self.COLOR_ACCENT_RED, fg="white",
                                        activebackground="#ff6666", activeforeground="white",
                                        relief=tk.RAISED, bd=5, padx=50, pady=30,
-                                       command=self.emergency_stop)
+                                       command=self._stop_collision_test)
         self.btn_stop_test.pack(pady=20)
 
         # Status Label for Test
@@ -4634,6 +4636,50 @@ class GCodeSenderGUI:
             self.test_view_frame.destroy()
         
         self.main_view_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _stop_collision_test(self):
+        """
+        Emergency stop specific to the collision avoidance test.
+        Sends M112 immediately to kill all motion, then resets the test
+        UI state without fully disconnecting (so the user can reconnect
+        or keep the connection alive for recovery).
+        """
+        self.log_message("!!! COLLISION TEST ABORTED — Emergency Stop !!!", "CRITICAL")
+
+        # Signal the worker thread to abort immediately
+        self.is_collision_test_running = False
+        self.stop_event.set()
+        self.pause_event.set()  # Unblock any paused state
+
+        # Invalidate the test result
+        self.rotation_crash_test_complete = False
+
+        # Send M112 hard-stop directly — bypass the worker queue
+        if self.serial_connection:
+            try:
+                self.serial_connection.write(b'M112\n')
+                import time as _t
+                _t.sleep(0.3)
+                self.serial_connection.reset_input_buffer()
+                self.serial_connection.reset_output_buffer()
+                self.log_message("M112 sent. Printer stopped.", "WARN")
+            except Exception as e:
+                self.log_message(f"Error sending M112: {e}", "ERROR")
+        else:
+            self.log_message("Not connected — no M112 sent.", "WARN")
+
+        # Update status indicators
+        self.status_indicator.set_status("error")
+        self.header_status_indicator.set_status("error")
+
+        # Reset the worker flags and test UI
+        self.is_manual_command_running = False
+        self.root.after(0, self._update_all_displays)
+        self.root.after(0, self._reset_test_ui)
+        self.root.after(0, self._update_section_borders)
+
+        # Clear the stop event so subsequent manual commands can run
+        self.stop_event.clear()
 
     def _start_collision_test(self):
         """Starts the collision test sequence in a background thread."""
