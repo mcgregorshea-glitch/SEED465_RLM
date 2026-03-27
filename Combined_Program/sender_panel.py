@@ -678,8 +678,10 @@ class GCodeSenderGUI:
         cli_tab = ttk.Frame(self.notebook, style='Panel.TFrame')
         display_tab = ttk.Frame(self.notebook, style='Panel.TFrame')
         
+        self.display_tab = display_tab  # Keep reference for tab-active checks
         self.notebook.add(cli_tab, text="Command Line")
         self.notebook.add(display_tab, text="3D View")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         
         # --- Style for Notebook ---
         style.configure('TNotebook', tabposition='n', borderwidth=0)
@@ -701,9 +703,9 @@ class GCodeSenderGUI:
         self.create_connection_frame(self.left_panel_scrollable)
         self.create_measurement_frame(self.left_panel_scrollable)
         self.create_manual_control_frame(self.left_panel_scrollable)
+        self.create_file_center_frame(self.left_panel_scrollable)   # SETUP (center XYZ)
         self.create_control_frame(self.left_panel_scrollable)        # EXECUTION CONTROL (file + progress merged in)
         self.create_position_control_frame(self.left_panel_scrollable)
-        self.create_file_center_frame(self.left_panel_scrollable)   # SETUP (center XYZ)
 
         # Variable traces for green-border feedback
         self.log_measurements_enabled.trace_add('write', lambda varname, index, mode: self._update_section_borders())
@@ -1511,10 +1513,25 @@ class GCodeSenderGUI:
         self._plot_cache_valid = True
         return self._plot_coords_cache
 
+    def _is_3d_tab_active(self):
+        """Returns True only when the '3D View' notebook tab is currently selected."""
+        try:
+            return self.notebook.select() == str(self.display_tab)
+        except Exception:
+            return False
+
+    def _on_tab_changed(self, event=None):
+        """Triggered when the user switches tabs. Refreshes the 3D plot if needed."""
+        if self._is_3d_tab_active():
+            # Defer slightly so the tab's canvas has finished drawing before matplotlib renders.
+            self.after(50, self._draw_3d_toolpath)
+
     def _draw_3d_toolpath(self):
         """Draws the full G-code toolpath on the 3D plot."""
         if not self.is_3d_plot_enabled.get() or not self.matplotlib_imported or not self.ax_3d:
             return
+        if not self._is_3d_tab_active():
+            return  # Skip render when 3D tab is hidden
             
         self.ax_3d.clear()
         self.marker_3d = None # Clear the reference to the old marker artist
@@ -1555,6 +1572,8 @@ class GCodeSenderGUI:
         """Updates the red dot indicating the current printer position on the 3D plot."""
         if not self.is_3d_plot_enabled.get() or not self.matplotlib_imported or not self.ax_3d:
             return
+        if not self._is_3d_tab_active():
+            return  # Skip render when 3D tab is hidden
 
         # Remove the previous marker
         if self.marker_3d:
