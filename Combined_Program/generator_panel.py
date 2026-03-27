@@ -1409,8 +1409,9 @@ class PatternGeneratorGUI:
         if hasattr(self, '_spinner_index'):
             del self._spinner_index
         try:
-            self.send_button.config(state='normal', text="Load to Sender")
-            self.generate_button.config(state='normal')
+            self.send_button.config(text="Load to Sender")
+            self.send_button.state(['!disabled'])
+            self.generate_button.state(['!disabled'])
         except Exception:
             pass
 
@@ -1460,8 +1461,9 @@ class PatternGeneratorGUI:
             temp_dir = tempfile.gettempdir()
             fname = os.path.join(temp_dir, f"SEED_AutoSend_{name}{ts}.gcode")
             # Show loading state on button
-            self.send_button.config(state='disabled', text="Working...")
-            self.generate_button.config(state='disabled')
+            self.send_button.config(text="Working...")
+            self.send_button.state(['disabled'])
+            self.generate_button.state(['disabled'])
             self._spinner_index = 0
             self._spinner_chars = ['\u25dc', '\u25dd', '\u25de', '\u25df']  # ◜◝◞◟
             self._animate_spinner()
