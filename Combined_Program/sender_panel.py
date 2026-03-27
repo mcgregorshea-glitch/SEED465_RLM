@@ -1874,21 +1874,20 @@ class GCodeSenderGUI:
         self.progress_label_var.set("Progress: Idle")
         
         try:
+            import os
+            from datetime import datetime
+
             # Store path instead of reading the whole file into memory
             self.gcode_filepath = filepath
             self.file_path_var.set(filepath)
-            self.header_file_var.set(os.path.basename(filepath))
-            
-            self.select_gcode_button.config(style='GreenRing.TButton')
-
-            self.progress_var.set(0.0)
-            
-            import os
-            from datetime import datetime
             
             # Update the header to show just the filename.
             filename = os.path.basename(filepath)
             self.header_file_var.set(filename.upper())
+            
+            self.select_gcode_button.config(style='GreenRing.TButton')
+
+            self.progress_var.set(0.0)
             
             self.log_message(f"Loading from {filepath}...")
             
@@ -2108,7 +2107,7 @@ class GCodeSenderGUI:
         self.log_message(f"Connecting... Port: {selected_port}, Baud: {baudrate}...")
         
         # --- Update GUI to "Connecting" state ---
-        self.connect_button.config(text="connecting...", state=tk.DISABLED)
+        self.connect_button.config(text="Connecting...", state=tk.DISABLED)
         self.cancel_connect_button.grid() # Reveal pre-gridded button in column 6
         self.cancel_connect_button.config(state=tk.NORMAL)
         self.port_combobox.config(state=tk.DISABLED)
