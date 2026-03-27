@@ -3262,7 +3262,7 @@ class GCodeSenderGUI:
         """Draws the toolpath for the CURRENT Z-LEVEL ONLY, plus grid, origin, and markers."""
         # pylint: disable=unused-argument
         # Only delete tagged items, not the persistent background
-        self.xy_canvas.delete("toolpath", "guides", "marker_blue", "marker_red", "crosshair")
+        self.xy_canvas.delete("toolpath", "guides", "marker_blue", "marker_red", "crosshair", "margin")
         bounds = self.PRINTER_BOUNDS
         w = self.xy_canvas.winfo_width(); h = self.xy_canvas.winfo_height()
         if w <= 1 or h <= 1: return
@@ -3275,21 +3275,82 @@ class GCodeSenderGUI:
             cy = h - (h * (wy - bounds['y_min']) / y_range) # Inverted Y
             return cx, cy
 
-        # --- Draw Grid & Origin Lines ---
-        grid_color = "#1a2c3a"
-        for i in range(int(bounds['x_min']), int(bounds['x_max']), 10):
-            if i != 0:
-                cx, _ = world_to_canvas(i, 0)
-                self.xy_canvas.create_line(cx, 0, cx, h, fill=grid_color, tags="guides", dash=(2, 4))
-        for i in range(int(bounds['y_min']), int(bounds['y_max']), 10):
-            if i != 0:
-                _, cy = world_to_canvas(0, i)
-                self.xy_canvas.create_line(0, cy, w, cy, fill=grid_color, tags="guides", dash=(2, 4))
+        # --- Draw Hash Grid & Axis Labels ---
+        grid_minor = "#1a2c3a"
+        grid_major = "#24404f"
+        label_color = "#3a5570"
+        font_small = ("Helvetica", 7)
 
+        for i in range(int(bounds['x_min']), int(bounds['x_max']) + 1, 10):
+            cx, _ = world_to_canvas(i, 0)
+            is_major = (i % 50 == 0)
+            color = grid_major if is_major else grid_minor
+            dash = () if is_major else (1, 3)
+            self.xy_canvas.create_line(cx, 0, cx, h, fill=color, tags="guides", dash=dash)
+            if i != 0 and i % 20 == 0:
+                self.xy_canvas.create_text(cx, h - 2, text=f"{i}", fill=label_color, font=font_small, anchor="s", tags="guides")
+
+        for i in range(int(bounds['y_min']), int(bounds['y_max']) + 1, 10):
+            _, cy = world_to_canvas(0, i)
+            is_major = (i % 50 == 0)
+            color = grid_major if is_major else grid_minor
+            dash = () if is_major else (1, 3)
+            self.xy_canvas.create_line(0, cy, w, cy, fill=color, tags="guides", dash=dash)
+            if i != 0 and i % 20 == 0:
+                self.xy_canvas.create_text(3, cy, text=f"{i}", fill=label_color, font=font_small, anchor="w", tags="guides")
+
+        # --- Origin Axes (brighter solid lines) ---
         if bounds['x_min'] <= 0 <= bounds['x_max'] and bounds['y_min'] <= 0 <= bounds['y_max']:
             canvas_x0, canvas_y0 = world_to_canvas(0, 0)
             self.xy_canvas.create_line(canvas_x0, 0, canvas_x0, h, fill=self.COLOR_BORDER, tags="guides")
             self.xy_canvas.create_line(0, canvas_y0, w, canvas_y0, fill=self.COLOR_BORDER, tags="guides")
+
+        # --- Margin Indicators from Current Position to Each Wall ---
+        try:
+            pos_x = self.last_cmd_abs_x
+            pos_y = self.last_cmd_abs_y
+            if pos_x is not None and pos_y is not None:
+                marker_cx, marker_cy = world_to_canvas(pos_x, pos_y)
+                edge_left_cx, _ = world_to_canvas(bounds['x_min'], 0)
+                edge_right_cx, _ = world_to_canvas(bounds['x_max'], 0)
+                _, edge_top_cy = world_to_canvas(0, bounds['y_max'])
+                _, edge_bot_cy = world_to_canvas(0, bounds['y_min'])
+
+                margin_color = "#4a6070"
+                margin_font = ("Helvetica", 7)
+
+                margin_left  = pos_x - bounds['x_min']
+                margin_right = bounds['x_max'] - pos_x
+                margin_front = pos_y - bounds['y_min']   # in printer space Y-min is "front"
+                margin_back  = bounds['y_max'] - pos_y
+
+                # Left margin line & label
+                self.xy_canvas.create_line(edge_left_cx, marker_cy, marker_cx, marker_cy,
+                                           fill=margin_color, dash=(2, 3), tags="margin")
+                self.xy_canvas.create_text(edge_left_cx + 2, marker_cy - 2,
+                                           text=f"{margin_left:.0f}", fill=margin_color,
+                                           font=margin_font, anchor="w", tags="margin")
+                # Right margin line & label
+                self.xy_canvas.create_line(marker_cx, marker_cy, edge_right_cx, marker_cy,
+                                           fill=margin_color, dash=(2, 3), tags="margin")
+                self.xy_canvas.create_text(edge_right_cx - 2, marker_cy - 2,
+                                           text=f"{margin_right:.0f}", fill=margin_color,
+                                           font=margin_font, anchor="e", tags="margin")
+                # Bottom (front) margin line & label
+                self.xy_canvas.create_line(marker_cx, marker_cy, marker_cx, edge_bot_cy,
+                                           fill=margin_color, dash=(2, 3), tags="margin")
+                self.xy_canvas.create_text(marker_cx + 2, edge_bot_cy - 2,
+                                           text=f"{margin_front:.0f}", fill=margin_color,
+                                           font=margin_font, anchor="sw", tags="margin")
+                # Top (back) margin line & label
+                self.xy_canvas.create_line(marker_cx, edge_top_cy, marker_cx, marker_cy,
+                                           fill=margin_color, dash=(2, 3), tags="margin")
+                self.xy_canvas.create_text(marker_cx + 2, edge_top_cy + 2,
+                                           text=f"{margin_back:.0f}", fill=margin_color,
+                                           font=margin_font, anchor="nw", tags="margin")
+        except Exception:
+            pass
+
 
         # --- Draw Center Crosshair ---
         try:
