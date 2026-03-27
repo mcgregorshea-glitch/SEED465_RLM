@@ -700,10 +700,10 @@ class GCodeSenderGUI:
         # --- Populate the GUI panels (in setup-flow order) ---
         self.create_connection_frame(self.left_panel_scrollable)
         self.create_measurement_frame(self.left_panel_scrollable)
-        self.create_file_center_frame(self.left_panel_scrollable)   # SETUP (center XYZ)
+        self.create_manual_control_frame(self.left_panel_scrollable)
         self.create_control_frame(self.left_panel_scrollable)        # EXECUTION CONTROL (file + progress merged in)
         self.create_position_control_frame(self.left_panel_scrollable)
-        self.create_manual_control_frame(self.left_panel_scrollable)
+        self.create_file_center_frame(self.left_panel_scrollable)   # SETUP (center XYZ)
 
         # Variable traces for green-border feedback
         self.log_measurements_enabled.trace_add('write', lambda varname, index, mode: self._update_section_borders())
@@ -1206,9 +1206,6 @@ class GCodeSenderGUI:
         ttk.Label(jog_params_frame, text="Rot Speed (deg/min):").pack(side=tk.LEFT, padx=(0, 5))
         self.rot_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_feedrate_var, width=6); self.rot_feedrate_entry.pack(side=tk.LEFT)
 
-        # Quick 'Mark as Center' shortcut
-        self.shortcut_mark_center_button = ttk.Button(jog_params_frame, text="● Mark as Center", command=self._mark_current_as_center, style='YellowRing.TButton')
-        self.shortcut_mark_center_button.pack(side=tk.LEFT, padx=(20, 0))
         
         self.manual_buttons = [self.home_button, self.jog_x_neg, self.jog_x_pos, self.jog_y_neg, self.jog_y_pos, self.jog_z_neg, self.jog_z_pos, self.jog_e_pos, self.jog_e_neg]
         self.manual_entries = [self.jog_step_entry, self.jog_feedrate_entry, self.rot_step_entry, self.rot_feedrate_entry]
