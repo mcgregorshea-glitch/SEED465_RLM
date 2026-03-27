@@ -843,11 +843,11 @@ class GCodeSenderGUI:
         frame = self._conn_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         
-        # Spacer column to push status to the right
-        frame.columnconfigure(6, weight=1)
+        # Spacer column - pushes the status label to the far right
+        frame.columnconfigure(7, weight=1)
         
         # Row 0
-        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection, width=10, style='YellowRing.TButton')
+        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection, width=13, style='YellowRing.TButton')
         self.connect_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         ttk.Label(frame, text="Port:").grid(row=0, column=1, sticky="w")
@@ -860,8 +860,11 @@ class GCodeSenderGUI:
         self.baud_entry = ttk.Entry(frame, textvariable=self.baud_var, width=10) 
         self.baud_entry.grid(row=0, column=5, padx=(0, 10), sticky="w")
         
-        # The cancel button is only shown during a connection attempt.
+        # The cancel button appears in column 6 when needed
         self.cancel_connect_button = ttk.Button(frame, text="Cancel", command=self._cancel_connection_attempt)
+        # We grid it here but use grid_remove to hide it initially without shifting columns 0-5
+        self.cancel_connect_button.grid(row=0, column=6, sticky="w", padx=(0, 10))
+        self.cancel_connect_button.grid_remove()
         
         # The status text label.
         self.status_label = ttk.Label(frame, textvariable=self.connection_status_var, font=self.FONT_BODY_SMALL, style='Filepath.TLabel') 
@@ -2105,10 +2108,9 @@ class GCodeSenderGUI:
         self.log_message(f"Connecting... Port: {selected_port}, Baud: {baudrate}...")
         
         # --- Update GUI to "Connecting" state ---
-        self.connect_button.config(state=tk.DISABLED)
-        self.cancel_connect_button.grid(row=0, column=5, sticky="w", padx=(5,0))
+        self.connect_button.config(text="connecting...", state=tk.DISABLED)
+        self.cancel_connect_button.grid() # Reveal pre-gridded button in column 6
         self.cancel_connect_button.config(state=tk.NORMAL)
-        self.connect_button.grid_remove() # Hide the connect button while cancel is shown
         self.port_combobox.config(state=tk.DISABLED)
         self.baud_entry.config(state=tk.DISABLED)
         
@@ -2132,9 +2134,9 @@ class GCodeSenderGUI:
         self.log_message("Connection attempt cancelled by user.", "WARN")
         self.cancel_connect_event.set()
         
-        # Hide the cancel button, restore connect button, and update the status display.
+        # Hide the cancel button, restore connect button text, and update the status display.
         self.cancel_connect_button.grid_remove()
-        self.connect_button.grid()
+        self.connect_button.config(text="Connect", state=tk.NORMAL)
         self.cancel_connect_button.config(state=tk.DISABLED)
         
         self.connection_status_var.set("Cancelling...")
@@ -3912,12 +3914,11 @@ class GCodeSenderGUI:
                 elif msg_type == "CONNECT_ATTEMPT_FINISHED":
                     # This message ensures controls are re-enabled even if connection fails or is cancelled.
                     if not self.serial_connection:
-                        self.connect_button.config(state=tk.NORMAL)
+                        self.connect_button.config(text="Connect", state=tk.NORMAL)
                         self.port_combobox.config(state="readonly")
                         self.baud_entry.config(state=tk.NORMAL)
                     if hasattr(self, 'cancel_connect_button'):
                         self.cancel_connect_button.grid_remove()
-                        self.connect_button.grid()
                         self.cancel_connect_button.config(state=tk.DISABLED)
                 
                 elif msg_type == "FILE_SEND_FINISHED":
@@ -4160,17 +4161,33 @@ class GCodeSenderGUI:
 
     def _mark_tilt_as_level(self):
         """
-        Sets the 'Center E' (tilt axis origin) to the printer's current tilt position.
-        This makes the current tilt angle read as 0° in relative mode.
+        Sends G92 E0 to the printer to set the current physical tilt as absolute 0.
+        Updates internal models to reflect this new origin.
         """
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self.log_message("Cannot mark tilt level: Printer not connected.", "WARN")
+            messagebox.showwarning("Mark Level Failed", "Printer is not connected.")
+            return
+
         if self.last_cmd_abs_e is None:
             self.log_message("Cannot mark tilt level: No known E position.", "WARN")
             messagebox.showwarning("Mark Level Failed", "Cannot mark tilt level.\nNo known tilt position.\nTry moving the printer first.")
             return
+            
         try:
-            self.center_e_var.set(f"{self.last_cmd_abs_e:.2f}")
-            self.log_message(f"Tilt level marked: E={self.last_cmd_abs_e:.2f} is now 0°", "SUCCESS")
+            # Tell printer to set current E to 0
+            self._send_manual_command("G92 E0")
+            
+            # Update internal absolute tracking
+            self.last_cmd_abs_e = 0.0
+            self.target_abs_e = 0.0
+            
+            # Set the user's defined "Center E" point to 0.00 to match
+            self.center_e_var.set("0.00")
+            
+            self.log_message("Absolute tilt position reset to 0°", "SUCCESS")
             self._on_center_change()
+            self._update_all_displays()
         except Exception as e:
             self.log_message(f"Error marking tilt level: {e}", "ERROR")
 
@@ -4560,6 +4577,11 @@ class GCodeSenderGUI:
         2. Sweep Tilt (E) through the full range found in the loaded G-code.
         """
         try:
+            def update_status(msg):
+                self.queue_message(msg, "INFO")
+                if hasattr(self, 'lbl_test_status') and self.lbl_test_status.winfo_exists():
+                    self.lbl_test_status.config(text=msg)
+
             self.is_manual_command_running = True
             self.is_collision_test_running = True
             self.root.after(0, self._update_all_displays)
@@ -4591,14 +4613,9 @@ class GCodeSenderGUI:
                         pause_time_ms = int(match.group(1))
             
             if not found_e:
-                # Fallback if no E moves found (e.g. flat print)
-                self.queue_message("No rotation (E) found in G-code. Using default +/- 10°.", "WARN")
-                min_e = -10.0
-                max_e = 10.0
-            
-            # Add a small safety buffer or use exact? 
-            # Request said "full range of rotation requested". Let's stick to exact per file.
-            self.queue_message(f"Test Range: E{min_e:.1f}° to E{max_e:.1f}°", "INFO")
+                update_status("No rotation (E) found in G-code. Skipping rotation test.")
+            else:
+                update_status(f"Test Range: E{min_e:.1f}° to E{max_e:.1f}°")
 
             
             # --- 2. Execution ---
@@ -4621,32 +4638,46 @@ class GCodeSenderGUI:
             speed_e = 500 # deg/min slowly
             
             # Step 1: Move Z axis to scan's minimum Z value first
-            self.queue_message(f"Moving to Min Z ({min_z})...")
+            update_status(f"Moving to Min Z ({min_z})...")
             cmd = f"G90\nG1 Z{min_z} F{speed_xy}\nM400\n"
             self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Move to Min Z timeout")
 
             # Step 2: Move to X,Y center
-            self.queue_message(f"Moving to Center ({cx}, {cy})...")
+            update_status(f"Moving to Center ({cx}, {cy})...")
             cmd = f"G1 X{cx} Y{cy} F{speed_xy}\nM400\n"
             self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Move to Center timeout")
 
-            # Step 3: Move to Max E slowly
-            self.queue_message(f"Tilting to Max ({max_e:.1f}°)...")
-            cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed_e}\nM400\n")
-            self.serial_connection.write(cmd.encode('utf-8'))
-            if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
-            
-            # Step 4: Move to Min E slowly
-            self.queue_message(f"Tilting to Min ({min_e:.1f}°)...")
-            cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed_e}\nM400\n")
-            self.serial_connection.write(cmd.encode('utf-8'))
-            if not self._wait_for_ok(timeout=60): raise Exception("Tilt Min timeout")
+            # Step 2.5: Home X, then Y, then Z sequentially
+            update_status("Homing X axis...")
+            self.serial_connection.write(b"G28 X\nM400\n")
+            if not self._wait_for_ok(timeout=60): raise Exception("Home X timeout")
+
+            update_status("Homing Y axis...")
+            self.serial_connection.write(b"G28 Y\nM400\n")
+            if not self._wait_for_ok(timeout=60): raise Exception("Home Y timeout")
+
+            update_status("Homing Z axis...")
+            self.serial_connection.write(b"G28 Z\nM400\n")
+            if not self._wait_for_ok(timeout=60): raise Exception("Home Z timeout")
+
+            if found_e:
+                # Step 3: Move to Max E slowly
+                update_status(f"Tilting to Max ({max_e:.1f}°)...")
+                cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed_e}\nM400\n")
+                self.serial_connection.write(cmd.encode('utf-8'))
+                if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
+                
+                # Step 4: Move to Min E slowly
+                update_status(f"Tilting to Min ({min_e:.1f}°)...")
+                cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed_e}\nM400\n")
+                self.serial_connection.write(cmd.encode('utf-8'))
+                if not self._wait_for_ok(timeout=60): raise Exception("Tilt Min timeout")
 
             # Step 5: Hold for Pause Time OR Multimeter Reading at Min E
             if getattr(self, 'is_dmm_connected', False) and self.auto_measure_enabled.get():
-                self.queue_message("Auto-Measure: Measuring at Min Tilt...")
+                update_status("Auto-Measure: Measuring at Min Tilt...")
                 if self.dmm_group:
                     try:
                         vals = self._take_measurement()
@@ -4654,27 +4685,28 @@ class GCodeSenderGUI:
                         if self.log_measurements_enabled.get():
                             self._log_measurement_to_file(vals, coords={'x': cx, 'y': cy, 'z': min_z, 'e': min_e})
                     except Exception as e:
-                        self.queue_message(f"Auto-Measure Error: {e}", "ERROR")
+                        update_status(f"Auto-Measure Error: {e}")
             elif pause_time_ms > 0:
                 sec = pause_time_ms / 1000.0
-                self.queue_message(f"Holding at Min Tilt for {sec}s...")
+                update_status(f"Holding at Min Tilt for {sec}s...")
                 import time
                 time.sleep(sec)
 
             # Step 6: Return to the "center position" for X,Y,Z, and E.
-            self.queue_message("Returning to Center XYZ + 0°...")
+            update_status("Returning to Center XYZ + 0°...")
             cmd = self._apply_e_conversion(f"G1 Z{cz} X{cx} Y{cy} E0 F{speed_xy}\nM400\n")
             self.serial_connection.write(cmd.encode('utf-8'))
             if not self._wait_for_ok(timeout=30): raise Exception("Return Center timeout")
 
             self.rotation_crash_test_complete = True
             self._update_section_borders()
-            self.queue_message("Collision Test Complete.", "SUCCESS")
             
             # Request explicit position polling now that printer is back.
             if self.serial_connection:
-                self.queue_message("Polling for current position...")
+                update_status("Polling for current position...")
                 self.serial_connection.write(b"M114\n")
+                
+            update_status("Collision Test Complete!")
             
             # Show completed popup
             self.root.after(0, lambda: messagebox.showinfo("Test Completed", "Collision Avoidance Test Successfully Completed!\n\nReturning to 0°."))
