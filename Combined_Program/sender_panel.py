@@ -282,6 +282,7 @@ class GCodeSenderGUI:
         self.COLOR_ACCENT_CYAN = "#00d4ff"      # Main accent color for buttons, highlights
         self.COLOR_ACCENT_GREEN = "#3fb950"     # Color for success messages, 'on' status
         self.COLOR_ACCENT_AMBER = "#ffa657"     # Color for warnings
+        self.COLOR_PENDING_RING = "#c4c1ff"     # Color for incomplete frame borders and pending buttons
         self.COLOR_ACCENT_RED = "#ff4444"       # Color for errors and stop buttons
         self.COLOR_BLACK = "#000000"           # Used for input fields and canvas backgrounds
         self.COLOR_GREY_COMPLETED = "#484f58"   # Color for completed segments of the toolpath
@@ -353,10 +354,18 @@ class GCodeSenderGUI:
         style.configure('DRO.TLabel', font=self.FONT_MONO, padding=(5, 5), background=self.COLOR_BLACK, foreground=self.COLOR_TEXT_SECONDARY, borderwidth=1, relief='sunken', anchor='w')
         style.configure('Red.DRO.TLabel', font=self.FONT_DRO, width=8, padding=(5, 5), background=self.COLOR_BLACK, foreground=self.COLOR_ACCENT_RED, borderwidth=0, relief='flat', anchor='e')
         style.configure('Blue.DRO.TLabel', font=self.FONT_DRO, width=8, padding=(5, 5), background=self.COLOR_BLACK, foreground=self.COLOR_ACCENT_AMBER, borderwidth=0, relief='flat', anchor='e')
+        style.configure('Subtle.DRO.TLabel', font=self.FONT_BODY_SMALL, padding=(5, 0), background=self.COLOR_BLACK, foreground=self.COLOR_TEXT_SECONDARY, borderwidth=0, relief='flat', anchor='e')
 
         # --- Button Styles ---
         style.configure('TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor=self.COLOR_BORDER, borderwidth=1, relief=tk.SOLID, padding=(12, 8), font=self.FONT_BODY)
         style.map('TButton', background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)], foreground=[('active', self.COLOR_ACCENT_CYAN)], bordercolor=[('active', self.COLOR_ACCENT_CYAN)])
+
+        # --- Ringed Button Styles ---
+        style.configure('YellowRing.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor=self.COLOR_PENDING_RING, borderwidth=1, relief=tk.SOLID, padding=(12, 8), font=self.FONT_BODY)
+        style.map('YellowRing.TButton', background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)], foreground=[('active', self.COLOR_PENDING_RING)], bordercolor=[('active', self.COLOR_PENDING_RING)])
+        
+        style.configure('GreenRing.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor=self.COLOR_ACCENT_GREEN, borderwidth=1, relief=tk.SOLID, padding=(12, 8), font=self.FONT_BODY)
+        style.map('GreenRing.TButton', background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)], foreground=[('active', self.COLOR_ACCENT_GREEN)], bordercolor=[('active', self.COLOR_ACCENT_GREEN)])
 
         # --- Primary Action Button (e.g., Connect, Start) ---
         style.configure('Primary.TButton', background=self.COLOR_ACCENT_CYAN, foreground=self.COLOR_BLACK, font=self.FONT_BODY_BOLD)
@@ -392,9 +401,11 @@ class GCodeSenderGUI:
         # Style for the "Off" (disabled) state
         style.configure('Custom.Toggle.Off.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_SECONDARY, bordercolor=self.COLOR_BORDER, font=custom_font, padding=padding)
         style.map('Custom.Toggle.Off.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)], foreground=[('active', self.COLOR_ACCENT_CYAN)])
-        # Style for the "On" (enabled) state - dark with illuminated border/text
-        style.configure('Custom.Toggle.On.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_ACCENT_CYAN, bordercolor=self.COLOR_ACCENT_CYAN, font=custom_font, padding=padding)
         style.map('Custom.Toggle.On.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)])
+
+        # --- Small Button Style for secondary tools ---
+        style.configure('Small.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor=self.COLOR_BORDER, font=custom_font, padding=padding)
+        style.map('Small.TButton', bordercolor=[('active', self.COLOR_ACCENT_CYAN)], foreground=[('active', self.COLOR_ACCENT_CYAN)])
 
         # --- Entry (Input) Style ---
         style.configure('TEntry',
@@ -465,6 +476,15 @@ class GCodeSenderGUI:
         style.configure('Grey.TLabelframe.Label',
                         background=self.COLOR_PANEL_BG,
                         foreground=self.COLOR_TEXT_SECONDARY,
+                        font=self.FONT_BODY_BOLD)
+
+        style.configure('Yellow.TLabelframe',
+                        background=self.COLOR_PANEL_BG,
+                        bordercolor=self.COLOR_PENDING_RING,
+                        relief=tk.SOLID, borderwidth=2)
+        style.configure('Yellow.TLabelframe.Label',
+                        background=self.COLOR_PANEL_BG,
+                        foreground=self.COLOR_PENDING_RING,
                         font=self.FONT_BODY_BOLD)
         
         # --- Scrollbar Style ---
@@ -754,23 +774,23 @@ class GCodeSenderGUI:
 
     def create_file_center_frame(self, parent):
         """Creates the 'SETUP' panel for defining the center point and running calibration."""
-        self._setup_frame = ttk.LabelFrame(parent, text="SETUP", padding="10", style='Grey.TLabelframe')
+        self._setup_frame = ttk.LabelFrame(parent, text="SETUP", padding="10", style='Yellow.TLabelframe')
         frame = self._setup_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         frame.columnconfigure(0, weight=1); frame.columnconfigure(1, weight=1); frame.columnconfigure(2, weight=1); frame.columnconfigure(3, weight=1); frame.columnconfigure(4, weight=1)
 
         # Row 0: Setup Action Buttons
-        self.mark_center_button = ttk.Button(frame, text="Mark Current as Center", command=self._mark_current_as_center, state=tk.DISABLED)
+        self.mark_center_button = ttk.Button(frame, text="Mark Current as Center", command=self._mark_current_as_center, state=tk.DISABLED, style='YellowRing.TButton')
         self.mark_center_button.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0,10), padx=(0,5))
 
-        self.collision_test_button = ttk.Button(frame, text="Collision Avoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED)
+        self.collision_test_button = ttk.Button(frame, text="Collision Avoidance Test", command=self._open_collision_test_screen, state=tk.DISABLED, style='YellowRing.TButton')
         self.collision_test_button.grid(row=0, column=2, columnspan=3, sticky="ew", pady=(0,10), padx=(5,0))
 
         # Row 1: Labels
         ttk.Label(frame, text="Center X:").grid(row=1, column=0, sticky="w", padx=(0, 5))
         ttk.Label(frame, text="Center Y:").grid(row=1, column=1, sticky="w", padx=(5, 5))
         ttk.Label(frame, text="Center Z:").grid(row=1, column=2, sticky="w", padx=(5, 5))
-        ttk.Label(frame, text="Center E:").grid(row=1, column=3, sticky="w", padx=(5, 5))
+        ttk.Label(frame, text="Center Tilt:").grid(row=1, column=3, sticky="w", padx=(5, 5))
         ttk.Label(frame, text="E-Cal (mm/°):").grid(row=1, column=4, sticky="w", padx=(5, 5))
 
         # Row 2: Entries and Lock Toggle
@@ -786,19 +806,30 @@ class GCodeSenderGUI:
         self.center_e_entry = ttk.Entry(frame, textvariable=self.center_e_var, width=8)
         self.center_e_entry.grid(row=2, column=3, sticky="ew", pady=(2,0), padx=(5, 5))
 
-        self.e_cal_entry = ttk.Entry(frame, textvariable=self.mm_per_degree_var, width=8, state='readonly')
-        self.e_cal_entry.grid(row=2, column=4, sticky="ew", pady=(2,0), padx=(5, 5))
+        ecal_container = ttk.Frame(frame, style='Panel.TFrame')
+        ecal_container.grid(row=2, column=4, sticky="ew", pady=(2,0), padx=(5, 5), columnspan=2)
+
+        self.e_cal_entry = ttk.Entry(ecal_container, textvariable=self.mm_per_degree_var, width=8, state='readonly')
+        self.e_cal_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.e_cal_lock_var = tk.BooleanVar(value=True)
+        
         def toggle_e_cal():
-            state = 'readonly' if self.e_cal_lock_var.get() else 'normal'
-            self.e_cal_entry.config(state=state)
-            if state == 'normal':
+            is_locked = not self.e_cal_lock_var.get()
+            
+            if not is_locked:
                 if not messagebox.askyesno("Confirm Unlock", "Are you sure you want to change the rotation ratio? This will affect tilt axis movements and could cause collisions."):
-                    self.e_cal_lock_var.set(True)
-                    self.e_cal_entry.config(state='readonly')
+                    return
+                self.e_cal_lock_var.set(False)
+                self.e_cal_entry.config(state='normal')
+                self.e_cal_lock_button.config(text="🔓")
+            else:
+                self.e_cal_lock_var.set(True)
+                self.e_cal_entry.config(state='readonly')
+                self.e_cal_lock_button.config(text="🔒")
 
-        ttk.Checkbutton(frame, text="Lock", variable=self.e_cal_lock_var, command=toggle_e_cal).grid(row=2, column=5, sticky="w", pady=(2,0))
+        self.e_cal_lock_button = ttk.Button(ecal_container, text="🔒", width=3, style='ViewCube.TButton', command=toggle_e_cal)
+        self.e_cal_lock_button.pack(side=tk.LEFT, padx=(2,0))
 
         # Bind changes in the center entries to update the coordinate displays.
         self.center_x_entry.bind('<FocusOut>', self._on_center_change); self.center_x_entry.bind('<Return>', self._on_center_change)
@@ -808,7 +839,7 @@ class GCodeSenderGUI:
 
     def create_connection_frame(self, parent):
         """Creates the 'CONNECTION' panel for managing the serial connection."""
-        self._conn_frame = ttk.LabelFrame(parent, text="CONNECTION", padding="10", style='Grey.TLabelframe')
+        self._conn_frame = ttk.LabelFrame(parent, text="CONNECTION", padding="10", style='Yellow.TLabelframe')
         frame = self._conn_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         
@@ -816,32 +847,30 @@ class GCodeSenderGUI:
         frame.columnconfigure(6, weight=1)
         
         # Row 0
-        ttk.Label(frame, text="Port:").grid(row=0, column=0, sticky="w"); 
+        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection, width=10, style='YellowRing.TButton')
+        self.connect_button.grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        ttk.Label(frame, text="Port:").grid(row=0, column=1, sticky="w")
         self.port_combobox = ttk.Combobox(frame, textvariable=self.port_var, values=self.available_ports, width=15, state="readonly", font=self.FONT_MONO)
-        self.port_combobox.grid(row=0, column=1, padx=(0, 5))
+        self.port_combobox.grid(row=0, column=2, padx=(0, 5))
         
-        ttk.Button(frame, text="Rescan", command=self.rescan_ports, width=7).grid(row=0, column=2, padx=(0, 10))
+        ttk.Button(frame, text="Rescan", command=self.rescan_ports, width=7).grid(row=0, column=3, padx=(0, 10))
 
-        ttk.Label(frame, text="Baud Rate:").grid(row=0, column=3, sticky="w", padx=(5,0)); 
-        self.baud_entry = ttk.Entry(frame, textvariable=self.baud_var, width=10); 
-        self.baud_entry.grid(row=0, column=4, padx=(0, 10), sticky="w")
-
-        self.connect_button = ttk.Button(frame, text="Connect", command=self.toggle_connection)
-        self.connect_button.grid(row=0, column=5, sticky="w", padx=(5,0))
+        ttk.Label(frame, text="Baud Rate:").grid(row=0, column=4, sticky="w", padx=(5,0))
+        self.baud_entry = ttk.Entry(frame, textvariable=self.baud_var, width=10) 
+        self.baud_entry.grid(row=0, column=5, padx=(0, 10), sticky="w")
         
         # The cancel button is only shown during a connection attempt.
         self.cancel_connect_button = ttk.Button(frame, text="Cancel", command=self._cancel_connection_attempt)
         
-        # The status indicator "LED" and its text label.
-        self.status_indicator = StatusIndicator(frame, self.COLOR_PANEL_BG)
-        self.status_indicator.grid(row=0, column=7, padx=(10, 0), sticky="e")
-        self.status_label = ttk.Label(frame, textvariable=self.connection_status_var, font=self.FONT_BODY_SMALL, style='Filepath.TLabel'); 
-        self.status_label.grid(row=0, column=8, padx=(0, 0), sticky="w")
+        # The status text label.
+        self.status_label = ttk.Label(frame, textvariable=self.connection_status_var, font=self.FONT_BODY_SMALL, style='Filepath.TLabel') 
+        self.status_label.grid(row=0, column=8, padx=(0, 0), sticky="e")
         
 
     def create_measurement_frame(self, parent):
         """Creates the 'MEASUREMENT' panel."""
-        self._meas_frame = ttk.LabelFrame(parent, text="MEASUREMENT", padding="10", style='Grey.TLabelframe')
+        self._meas_frame = ttk.LabelFrame(parent, text="MEASUREMENT", padding="10", style='Yellow.TLabelframe')
         frame = self._meas_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         
@@ -849,7 +878,7 @@ class GCodeSenderGUI:
         top_frame = ttk.Frame(frame, style='Panel.TFrame')
         top_frame.pack(fill=tk.X, pady=(0, 10))
         
-        self.dmm_connect_button = ttk.Button(top_frame, text="Connect DMMs", command=self.toggle_dmm_connection)
+        self.dmm_connect_button = ttk.Button(top_frame, text="Connect DMMs", command=self.toggle_dmm_connection, style='YellowRing.TButton')
         self.dmm_connect_button.pack(side=tk.LEFT, padx=(0, 15))
         
         ttk.Label(top_frame, text="IP Prefix:", font=self.FONT_BODY_SMALL).pack(side=tk.LEFT)
@@ -881,7 +910,7 @@ class GCodeSenderGUI:
         self.log_path_entry = ttk.Entry(mid_frame, textvariable=self.log_filepath_var, font=self.FONT_BODY_SMALL, state='readonly')
         self.log_path_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
         
-        self.browse_log_btn = ttk.Button(mid_frame, text="Select Data File...", command=self.select_log_file)
+        self.browse_log_btn = ttk.Button(mid_frame, text="Select Data File...", command=self.select_log_file, style='YellowRing.TButton')
         self.browse_log_btn.grid(row=0, column=2, sticky="e")
         
         mid_frame.columnconfigure(1, weight=1)
@@ -932,7 +961,7 @@ class GCodeSenderGUI:
 
     def create_control_frame(self, parent):
         """Creates the 'EXECUTION CONTROL' panel with file picker, Start/Pause/Stop, and progress."""
-        self._ctrl_frame = ttk.LabelFrame(parent, text="EXECUTION CONTROL", padding=10, style='Grey.TLabelframe')
+        self._ctrl_frame = ttk.LabelFrame(parent, text="EXECUTION CONTROL", padding=10, style='Yellow.TLabelframe')
         frame = self._ctrl_frame
         frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         frame.columnconfigure(1, weight=1)
@@ -940,7 +969,8 @@ class GCodeSenderGUI:
         # --- File Picker Row (moved from SETUP) ---
         file_row = ttk.Frame(frame, style='Panel.TFrame')
         file_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Button(file_row, text="Select G-Code File", command=self.select_file).pack(side=tk.LEFT, padx=(0, 8))
+        self.select_gcode_button = ttk.Button(file_row, text="Select G-Code File", command=self.select_file, style='YellowRing.TButton')
+        self.select_gcode_button.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(file_row, text="Clear", command=self.clear_file).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(file_row, textvariable=self.file_path_var, wraplength=250, style='Filepath.TLabel').pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -1007,19 +1037,26 @@ class GCodeSenderGUI:
         
         dro_frame.columnconfigure(1, weight=1); dro_frame.columnconfigure(2, weight=1); dro_frame.columnconfigure(3, weight=1); dro_frame.columnconfigure(4, weight=1)
         
+        # Column Headers
+        ttk.Label(dro_frame, text="", style='Subtle.DRO.TLabel').grid(row=0, column=0, sticky="ew") 
+        ttk.Label(dro_frame, text="X", style='Subtle.DRO.TLabel').grid(row=0, column=1, sticky="ew")
+        ttk.Label(dro_frame, text="Y", style='Subtle.DRO.TLabel').grid(row=0, column=2, sticky="ew", padx=5)
+        ttk.Label(dro_frame, text="Z", style='Subtle.DRO.TLabel').grid(row=0, column=3, sticky="ew")
+        ttk.Label(dro_frame, text="Tilt", style='Subtle.DRO.TLabel').grid(row=0, column=4, sticky="ew", padx=5)
+
         # Labels for the 'CURRENT' (last commanded) position.
-        ttk.Label(dro_frame, text="CURRENT:", style='DRO.TLabel').grid(row=0, column=0, sticky="w"); 
-        ttk.Label(dro_frame, textvariable=self.last_cmd_x_display_var, style='Red.DRO.TLabel').grid(row=0, column=1, sticky="ew")
-        ttk.Label(dro_frame, textvariable=self.last_cmd_y_display_var, style='Red.DRO.TLabel').grid(row=0, column=2, sticky="ew", padx=5)
-        ttk.Label(dro_frame, textvariable=self.last_cmd_z_display_var, style='Red.DRO.TLabel').grid(row=0, column=3, sticky="ew")
-        ttk.Label(dro_frame, textvariable=self.last_cmd_e_display_var, style='Red.DRO.TLabel').grid(row=0, column=4, sticky="ew", padx=5)
+        ttk.Label(dro_frame, text="CURRENT:", style='DRO.TLabel').grid(row=1, column=0, sticky="w"); 
+        ttk.Label(dro_frame, textvariable=self.last_cmd_x_display_var, style='Red.DRO.TLabel').grid(row=1, column=1, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.last_cmd_y_display_var, style='Red.DRO.TLabel').grid(row=1, column=2, sticky="ew", padx=5)
+        ttk.Label(dro_frame, textvariable=self.last_cmd_z_display_var, style='Red.DRO.TLabel').grid(row=1, column=3, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.last_cmd_e_display_var, style='Red.DRO.TLabel').grid(row=1, column=4, sticky="ew", padx=5)
         
         # Labels for the 'TARGET' (Go To) position.
-        ttk.Label(dro_frame, text=" TARGET:", style='DRO.TLabel').grid(row=1, column=0, sticky="w"); 
-        ttk.Label(dro_frame, textvariable=self.goto_x_display_var, style='Blue.DRO.TLabel').grid(row=1, column=1, sticky="ew")
-        ttk.Label(dro_frame, textvariable=self.goto_y_display_var, style='Blue.DRO.TLabel').grid(row=1, column=2, sticky="ew", padx=5)
-        ttk.Label(dro_frame, textvariable=self.goto_z_display_var, style='Blue.DRO.TLabel').grid(row=1, column=3, sticky="ew")
-        ttk.Label(dro_frame, textvariable=self.goto_e_display_var, style='Blue.DRO.TLabel').grid(row=1, column=4, sticky="ew", padx=5)
+        ttk.Label(dro_frame, text=" TARGET:", style='DRO.TLabel').grid(row=2, column=0, sticky="w"); 
+        ttk.Label(dro_frame, textvariable=self.goto_x_display_var, style='Blue.DRO.TLabel').grid(row=2, column=1, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.goto_y_display_var, style='Blue.DRO.TLabel').grid(row=2, column=2, sticky="ew", padx=5)
+        ttk.Label(dro_frame, textvariable=self.goto_z_display_var, style='Blue.DRO.TLabel').grid(row=2, column=3, sticky="ew")
+        ttk.Label(dro_frame, textvariable=self.goto_e_display_var, style='Blue.DRO.TLabel').grid(row=2, column=4, sticky="ew", padx=5)
         
         # --- Frame to hold the XY, Z, and E canvases ---
         self.canvas_frame = ttk.Frame(frame, height=150, style='Panel.TFrame')
@@ -1167,7 +1204,8 @@ class GCodeSenderGUI:
         self.rot_feedrate_entry = ttk.Entry(jog_params_frame, textvariable=self.rotation_feedrate_var, width=6); self.rot_feedrate_entry.pack(side=tk.LEFT)
 
         # Quick 'Mark as Center' shortcut
-        ttk.Button(jog_params_frame, text="● Mark as Center", command=self._mark_current_as_center).pack(side=tk.LEFT, padx=(20, 0))
+        self.shortcut_mark_center_button = ttk.Button(jog_params_frame, text="● Mark as Center", command=self._mark_current_as_center, style='YellowRing.TButton')
+        self.shortcut_mark_center_button.pack(side=tk.LEFT, padx=(20, 0))
         
         self.manual_buttons = [self.home_button, self.jog_x_neg, self.jog_x_pos, self.jog_y_neg, self.jog_y_pos, self.jog_z_neg, self.jog_z_pos, self.jog_e_pos, self.jog_e_neg]
         self.manual_entries = [self.jog_step_entry, self.jog_feedrate_entry, self.rot_step_entry, self.rot_feedrate_entry]
@@ -1316,6 +1354,7 @@ class GCodeSenderGUI:
         self.launch_visualizer_button = ttk.Button(
             control_bar,
             text="Launch Data Visualizer",
+            style='Small.TButton',
             command=self.launch_visualizer
         )
         self.launch_visualizer_button.pack(side=tk.LEFT, padx=(10, 0))
@@ -1834,9 +1873,12 @@ class GCodeSenderGUI:
         try:
             # Store path instead of reading the whole file into memory
             self.gcode_filepath = filepath
-            
-            # --- UPDATE UI ELEMENTS ---
             self.file_path_var.set(filepath)
+            self.header_file_var.set(os.path.basename(filepath))
+            
+            self.select_gcode_button.config(style='GreenRing.TButton')
+
+            self.progress_var.set(0.0)
             
             import os
             from datetime import datetime
@@ -2071,7 +2113,6 @@ class GCodeSenderGUI:
         self.baud_entry.config(state=tk.DISABLED)
         
         self.connection_status_var.set("Connecting...")
-        self.status_indicator.set_status("busy")
         self.header_status_indicator.set_status("busy")
         self.footer_status_var.set(f"Connecting...")
         
@@ -2245,7 +2286,7 @@ class GCodeSenderGUI:
         # If a connection is in progress, cancel it instead.
         if self.connect_button['state'] == tk.DISABLED and not self.serial_connection and hasattr(self, 'cancel_connect_button') and self.cancel_connect_button.winfo_ismapped():
              self.log_message("Disconnect during connect - Cancelling.", "WARN")
-             self.cancel_connect_event.set()
+             self._cancel_connection_attempt()
              return
              
         # Prevent disconnection while a job is running.
@@ -2254,7 +2295,7 @@ class GCodeSenderGUI:
             messagebox.showwarning("Busy", "Please stop the current operation before disconnecting.")
             return
             
-        if self.serial_connection:
+        if self.serial_connection and self.serial_connection.is_open:
             try:
                 self.serial_connection.close()
             except Exception as e:
@@ -2269,7 +2310,7 @@ class GCodeSenderGUI:
         self.header_status_indicator.set_status("off")
         self.footer_status_var.set("COM: -- @ --")
         
-        self.connect_button.config(text="Connect", state=tk.NORMAL)
+        self.connect_button.config(text="Connect", state=tk.NORMAL, style='YellowRing.TButton')
         self.port_combobox.config(state="readonly")
         self.baud_entry.config(state=tk.NORMAL)
         
@@ -2316,6 +2357,15 @@ class GCodeSenderGUI:
             ans = messagebox.askyesno("Safety Check", 
                                       "The Rotation Collision Avoidance Test has not been completed for this profile.\n\n"
                                       "Are you sure you want to proceed with the scan?")
+            if not ans:
+                return
+                
+        # --- CSV Logging Check ---
+        if not self.log_measurements_enabled.get() or not self.log_filepath_var.get().strip():
+            ans = messagebox.askyesno("Logging Not Active", 
+                                      "You are about to start a run, but 'Log to CSV' is not enabled or no file is selected.\n\n"
+                                      "Measurement data from this run will NOT be saved.\n\n"
+                                      "Are you sure you want to proceed?")
             if not ans:
                 return
             
@@ -2390,7 +2440,6 @@ class GCodeSenderGUI:
             self._set_terminal_controls_state(tk.NORMAL)
                
             # Set status indicators to "busy" (amber) to show it's paused.
-            self.status_indicator.set_status("busy")
             self.header_status_indicator.set_status("busy")
 
     def emergency_stop(self):
@@ -3145,25 +3194,29 @@ class GCodeSenderGUI:
             center_x = float(self.center_x_var.get())
             center_y = float(self.center_y_var.get())
             center_z = float(self.center_z_var.get())
+            center_e = float(self.center_e_var.get())
 
             # 2. Set the internal 'target' position model.
             self.target_abs_x = center_x
             self.target_abs_y = center_y
             self.target_abs_z = center_z
+            self.target_abs_e = center_e
 
             # 3. Update all displays (DRO labels and canvas markers).
             self._update_all_displays()
-            self.log_message(f"Target set to center: X={center_x:.2f}, Y={center_y:.2f}, Z={center_z:.2f}", "INFO")
+            self.log_message(f"Target set to center: X={center_x:.2f}, Y={center_y:.2f}, Z={center_z:.2f}, E={center_e:.2f}", "INFO")
 
             # 4. Also update the 'Go To' entry boxes to reflect this change.
             mode = self.coord_mode.get()
             display_x = f"{center_x:.2f}" if mode == "absolute" else "0.00"
             display_y = f"{center_y:.2f}" if mode == "absolute" else "0.00"
             display_z = f"{center_z:.2f}" if mode == "absolute" else "0.00"
+            display_e = f"{center_e:.2f}" if mode == "absolute" else "0.00"
 
             self.goto_x_entry.delete(0, tk.END); self.goto_x_entry.insert(0, display_x)
             self.goto_y_entry.delete(0, tk.END); self.goto_y_entry.insert(0, display_y)
             self.goto_z_entry.delete(0, tk.END); self.goto_z_entry.insert(0, display_z)
+            self.goto_e_entry.delete(0, tk.END); self.goto_e_entry.insert(0, display_e)
 
         except ValueError:
             self.log_message("Cannot 'Go to Center': Invalid center coordinates.", "ERROR")
@@ -3809,11 +3862,10 @@ class GCodeSenderGUI:
                     self.log_message(f"Connected on {found_port}!", "SUCCESS")
                     
                     self.connection_status_var.set(f"Connected to {found_port}")
-                    self.status_indicator.set_status("on")
                     self.header_status_indicator.set_status("on")
                     self.footer_status_var.set(f"{found_port} @ {baudrate}")
                     
-                    self.connect_button.config(text="Disconnect", state=tk.NORMAL)
+                    self.connect_button.config(text="Disconnect", state=tk.NORMAL, style='GreenRing.TButton')
                     self.port_combobox.config(state=tk.DISABLED)
                     self.baud_entry.config(state=tk.DISABLED)
                     
@@ -3898,7 +3950,6 @@ class GCodeSenderGUI:
                         self._set_goto_controls_state(tk.NORMAL)
                         self._set_terminal_controls_state(tk.NORMAL)
                         self.start_button.config(state=tk.NORMAL if self.processed_gcode else tk.DISABLED)
-                        self.status_indicator.set_status("on")
                         self.header_status_indicator.set_status("on")
                 
                 elif msg_type == "CONNECTION_LOST":
@@ -3920,7 +3971,7 @@ class GCodeSenderGUI:
                 elif msg_type == "DMM_CONNECTED":
                     self.is_dmm_connected = True
                     self.dmm_status_var.set("DMMs: Connected")
-                    self.dmm_connect_button.config(text="Disconnect DMMs", state=tk.NORMAL)
+                    self.dmm_connect_button.config(text="Disconnect DMMs", state=tk.NORMAL, style='GreenRing.TButton')
                     self.measure_button.config(state=tk.NORMAL)
                     self.log_message("DMMs connected successfully.", "SUCCESS")
                     self._update_section_borders()
@@ -4049,21 +4100,29 @@ class GCodeSenderGUI:
     def _update_section_borders(self):
         """Updates the LabelFrame border colour to green when each section's setup condition is met."""
         GREEN = 'Green.TLabelframe'
-        GREY  = 'Grey.TLabelframe'
+        YELLOW = 'Yellow.TLabelframe'
 
         # CONNECTION — green once printer is connected
         if hasattr(self, '_conn_frame'):
-            self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else GREY)
+            self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else YELLOW)
 
         # MEASUREMENT — green when DMM connected AND (Log to CSV off OR file path set)
         if hasattr(self, '_meas_frame'):
             log_ok = not self.log_measurements_enabled.get() or bool(self.log_filepath_var.get().strip())
-            self._meas_frame.configure(style=GREEN if (self.is_dmm_connected and log_ok) else GREY)
+            self._meas_frame.configure(style=GREEN if (self.is_dmm_connected and log_ok) else YELLOW)
 
         # SETUP — green when center has been marked AND collision test completed
         if hasattr(self, '_setup_frame'):
             setup_ok = self.center_marked and self.rotation_crash_test_complete
-            self._setup_frame.configure(style=GREEN if setup_ok else GREY)
+            self._setup_frame.configure(style=GREEN if setup_ok else YELLOW)
+            
+        # EXECUTION CONTROL — green when gcode is loaded
+        if hasattr(self, '_ctrl_frame'):
+            ctrl_ok = bool(self.gcode_filepath)
+            self._ctrl_frame.configure(style=GREEN if ctrl_ok else YELLOW)
+
+        if hasattr(self, 'collision_test_button'):
+            self.collision_test_button.configure(style='GreenRing.TButton' if self.rotation_crash_test_complete else 'YellowRing.TButton')
 
     def _mark_current_as_center(self):
         """
@@ -4087,6 +4146,12 @@ class GCodeSenderGUI:
             e_str = f", E={self.last_cmd_abs_e:.2f}" if self.last_cmd_abs_e is not None else ""
             self.log_message(f"New center marked at: X={self.last_cmd_abs_x:.2f}, Y={self.last_cmd_abs_y:.2f}, Z={self.last_cmd_abs_z:.2f}{e_str}", "SUCCESS")
             self.center_marked = True
+            self.mark_center_button.config(style='GreenRing.TButton')
+            try:
+                self.shortcut_mark_center_button.config(style='GreenRing.TButton')
+            except AttributeError:
+                pass
+                
             # Trigger the same logic as if the user changed the entry fields manually.
             self._on_center_change()
             self._update_section_borders()
@@ -4303,7 +4368,7 @@ class GCodeSenderGUI:
         self.dmm_group = None
         self.is_dmm_connected = False
         self.dmm_status_var.set("DMMs: Disconnected")
-        self.dmm_connect_button.config(text="Connect DMMs")
+        self.dmm_connect_button.config(text="Connect DMMs", state=tk.NORMAL, style='YellowRing.TButton')
         self.measure_button.config(state=tk.DISABLED)
 
     def trigger_manual_measurement(self):
@@ -4358,6 +4423,8 @@ class GCodeSenderGUI:
         )
         if filename:
             self.log_filepath_var.set(filename)
+            self.log_message(f"Selected log file: {filename}", "INFO")
+            self.browse_log_btn.config(style='GreenRing.TButton')
 
     def _log_measurement_to_file(self, values, coords=None):
         filepath = self.log_filepath_var.get()

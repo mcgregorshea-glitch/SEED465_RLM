@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SEED DMM Voltage Visualizer</title>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #00d4ff;
+      --accent2: #7c3aed;
+      --green: #3fb950;
+      --red: #f85149;
+      --radius: 10px;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 12px 16px;
+      gap: 12px;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      width: 100%;
+      max-width: 1100px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .title-group h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: .03em;
+      color: var(--text);
+    }
+
+    .title-group p {
+      color: var(--muted);
+      font-size: .85rem;
+      margin-top: 2px;
+    }
+
+    /* ── File Loader ── */
+    .file-area {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    #file-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 18px;
+      font-size: .9rem;
+      font-weight: 600;
+      color: var(--accent);
+      transition: border-color .2s, box-shadow .2s;
+    }
+
+    #file-label:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0, 212, 255, .15);
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    #file-name {
+      color: var(--muted);
+      font-size: .85rem;
+      white-space: nowrap;
+    }
+
+    /* ── Status Badge ── */
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: .8rem;
+      font-weight: 600;
+      background: rgba(139, 148, 158, .1);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      transition: all .3s;
+    }
+
+    #status.ok {
+      background: rgba(63, 185, 80, .12);
+      border-color: var(--green);
+      color: var(--green);
+    }
+
+    #status.err {
+      background: rgba(248, 81, 73, .12);
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    /* ── Main Card ── */
+    .card {
+      width: 100%;
+      max-width: 1100px;
+      flex: 1;
+      min-height: 0;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Plot Area ── */
+    .plot-area {
+      display: flex;
+      width: 100%;
+      flex: 1;
+      min-height: 200px;
+      position: relative;
+    }
+
+    #plot {
+      flex: 1;
+      min-width: 0;
+      min-height: 0;
+      align-self: stretch;
+    }
+
+    .vertical-z {
+      width: 100px;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 10px;
+      gap: 15px;
+    }
+
+    .vertical-z .slider-header {
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .v-slider-wrap {
+      flex: 1;
+      position: relative;
+      width: 20px;
+    }
+
+    input[type="range"].vertical {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 400px;
+      /* The length of the rotated slider */
+      height: 6px;
+      transform: translate(-50%, -50%) rotate(-90deg);
+    }
+
+    /* ── Controls ── */
+    .controls {
+      padding: 12px 24px;
+      display: flex;
+      justify-content: center;
+      border-top: 1px solid var(--border);
+      background: var(--panel);
+    }
+
+    .controls .slider-group {
+      width: 50%;
+      min-width: 300px;
+    }
+
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+
+    .slider-label {
+      font-size: .8rem;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .slider-value {
+      font-size: 1.1rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+
+    .slider-unit {
+      font-size: .75rem;
+      color: var(--muted);
+      margin-left: 2px;
+    }
+
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: var(--border);
+      outline: none;
+      cursor: pointer;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px rgba(0, 212, 255, .5);
+      cursor: pointer;
+      transition: transform .15s, box-shadow .15s;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 0 14px rgba(0, 212, 255, .7);
+    }
+
+    #z-slider::-webkit-slider-thumb {
+      background: var(--accent2);
+      box-shadow: 0 0 8px rgba(124, 58, 237, .5);
+    }
+
+    #z-slider::-webkit-slider-thumb:hover {
+      box-shadow: 0 0 14px rgba(124, 58, 237, .7);
+    }
+
+    .tick-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: .7rem;
+      color: var(--muted);
+      padding: 0 1px;
+    }
+
+    .tick-col {
+      position: absolute;
+      top: 50%;
+      left: 20px;
+      height: calc(100% - 100px);
+      transform: translateY(-50%);
+      display: flex;
+      flex-direction: column-reverse;
+      justify-content: space-between;
+      font-size: .7rem;
+      color: var(--muted);
+    }
+
+    /* ── Stats Table ── */
+    .stats-bar {
+      padding: 0;
+      border-top: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    .stats-table th,
+    .stats-table td {
+      padding: 6px 15px;
+      text-align: left;
+      border-right: 1px solid var(--border);
+      font-size: .8rem;
+    }
+
+    .stats-table th:last-child,
+    .stats-table td:last-child {
+      border-right: none;
+    }
+
+    .stats-table th {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      font-size: .7rem;
+    }
+
+    .stats-table td {
+      font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Empty state ── */
+    #empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 400px;
+      color: var(--muted);
+      gap: 12px;
+    }
+
+    #empty svg {
+      opacity: .3;
+    }
+
+    #empty p {
+      font-size: .9rem;
+    }
+
+    /* ── Buttons ── */
+    .btn-icon {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .btn-icon:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(0, 212, 255, 0.05);
+    }
+
+    .btn-icon.active {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(0, 212, 255, 0.1);
+    }
+
+    .controls-overlay {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 44px 8px 8px 8px;
+      gap: 10px;
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+      min-width: 46px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div class="title-group">
+      <h1>Wireless Charging Voltage</h1>
+    </div>
+  </header>
+
+  <input type="file" id="file-input" accept=".csv" style="display:none" />
+
+  <div class="card">
+    <div class="plot-area">
+      <div class="vertical-z" id="z-controls" style="display:none">
+        <div class="slider-header">
+          <span class="slider-label">Z Height</span>
+          <span class="slider-value" id="z-val">—<span class="slider-unit">mm</span></span>
+        </div>
+        <div class="v-slider-wrap">
+          <input type="range" id="z-slider" class="vertical" min="0" max="0" step="1" value="0" />
+          <div class="tick-col" id="z-ticks"></div>
+        </div>
+      </div>
+
+      <div id="plot" style="position:relative;">
+        <div id="empty">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#8b949e" stroke-width="1.2">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+          </svg>
+          <p>Load a CSV file to render the voltage surface</p>
+        </div>
+      </div>
+
+      <!-- Icon sidebar: sits outside the Plotly div, never overlaps the colorbar -->
+      <div class="controls-overlay" id="plot-buttons" style="display:none">
+        <label class="btn-icon" for="file-input" title="Load CSV">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+        </label>
+        <button class="btn-icon" id="btn-2d" title="Toggle 2D / 3D view">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <line x1="3" y1="9" x2="21" y2="9" />
+            <line x1="3" y1="15" x2="21" y2="15" />
+            <line x1="9" y1="3" x2="9" y2="21" />
+            <line x1="15" y1="3" x2="15" y2="21" />
+          </svg>
+        </button>
+        <button class="btn-icon" id="btn-reset" title="Reset Camera">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 4v6h-6" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+          </svg>
+        </button>
+        <button class="btn-icon" id="btn-wireframe" title="Toggle Wireframe">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" />
+            <path d="M12 12l8-4.5" />
+            <path d="M12 12v9" />
+            <path d="M12 12L4 7.5" />
+          </svg>
+        </button>
+        <button class="btn-icon" id="btn-download" title="Save PNG">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="controls" id="controls" style="display:none">
+      <!-- E (Tilt) slider -->
+      <div class="slider-group">
+        <div class="slider-header">
+          <span class="slider-label">Tilt Angle</span>
+          <span class="slider-value" id="e-val">—<span class="slider-unit">°</span></span>
+        </div>
+        <input type="range" id="e-slider" min="0" max="0" step="1" value="0" />
+        <div class="tick-row" id="e-ticks"></div>
+      </div>
+    </div>
+
+    <div class="stats-bar" id="stats-bar" style="display:none">
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th>Points</th>
+            <th>X Range</th>
+            <th>Y Range</th>
+            <th>Z Range</th>
+            <th>Tilt Range</th>
+            <th>Voltage Range</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td id="s-points">—</td>
+            <td id="s-xrange">—</td>
+            <td id="s-yrange">—</td>
+            <td id="s-zrange">—</td>
+            <td id="s-erange">—</td>
+            <td id="s-vrange">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // ─── State ───────────────────────────────────────────────────────────────────
+    let allRows = [];
+    let eVals = [];   // sorted unique E values
+    let zVals = [];   // sorted unique Z values
+    let voltagCol = ''; // header name of the voltage column
+    let currentFileName = ''; // tracks the loaded csv name
+    let globalXRange = [];
+    let globalYRange = [];
+    let globalVRange = [];
+    const DEFAULT_CAMERA = { eye: { x: 1.6, y: -1.6, z: 1.1 } };
+    let savedCamera = DEFAULT_CAMERA;
+    let plotMode = '3d'; // '3d' | '2d'
+
+    // Show the buttons overlay early so the load button is accessible
+    document.getElementById('plot-buttons').style.display = 'flex';
+
+    // ─── Helpers ─────────────────────────────────────────────────────────────────
+    const setStatus = (msg, cls = '') => {
+      const el = document.getElementById('status');
+      if (el) {
+        el.innerHTML = `<span class="dot"></span>${msg}`;
+        el.className = cls;
+      }
+    };
+
+    const uniq = arr => [...new Set(arr)].sort((a, b) => a - b);
+    const fmt = (n, d = 2) => Number(n).toFixed(d);
+    const fmtRange = (a, b, unit = '') => `[${fmt(a)}, ${fmt(b)}]${unit}`;
+
+    function buildTicks(container, vals) {
+      container.innerHTML = '';
+      const show = vals.length <= 8 ? vals : [vals[0], ...vals.slice(1, -1).filter((_, i, a) => i % Math.ceil(a.length / 5) === 0), vals[vals.length - 1]];
+      show.forEach(v => {
+        const s = document.createElement('span');
+        s.textContent = fmt(v, v % 1 === 0 ? 0 : 1);
+        container.appendChild(s);
+      });
+    }
+
+    // ─── CSV Loading ─────────────────────────────────────────────────────────────
+    document.getElementById('file-input').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      currentFileName = file.name;
+      // Reset input so re-selecting the same file still triggers change
+      e.target.value = '';
+      setStatus('Parsing…');
+
+      Papa.parse(file, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true,
+        complete: result => {
+          if (result.errors.length) {
+            setStatus('Parse error', 'err');
+            console.error(result.errors);
+            return;
+          }
+          processData(result.data, result.meta.fields);
+        }
+      });
+    });
+
+    // ─── Data Processing ─────────────────────────────────────────────────────────
+    function processData(rows, fields) {
+      // Identify voltage column (anything after Timestamp,X,Y,Z,E)
+      const reserved = ['Timestamp', 'X', 'Y', 'Z', 'E'];
+      const vCols = fields.filter(f => !reserved.includes(f));
+      if (!vCols.length) { setStatus('No voltage column found', 'err'); return; }
+      voltagCol = vCols[0];
+
+      // Filter out rows missing key data
+      allRows = rows.filter(r =>
+        r.X != null && r.Y != null && r.E != null && r.Z != null && r[voltagCol] != null
+      );
+
+      if (!allRows.length) { setStatus('No valid rows', 'err'); return; }
+
+      eVals = uniq(allRows.map(r => r.E));
+      zVals = uniq(allRows.map(r => r.Z));
+
+      // Configure E slider
+      const eSlider = document.getElementById('e-slider');
+      eSlider.min = 0;
+      eSlider.max = eVals.length - 1;
+      eSlider.value = 0;
+      buildTicks(document.getElementById('e-ticks'), eVals);
+      document.getElementById('e-val').innerHTML = `${fmt(eVals[0], 1)}<span class="slider-unit">°</span>`;
+
+      // Configure Z slider
+      const zSlider = document.getElementById('z-slider');
+      zSlider.min = 0;
+      zSlider.max = zVals.length - 1;
+      zSlider.value = 0;
+      buildTicks(document.getElementById('z-ticks'), zVals);
+      document.getElementById('z-val').innerHTML = `${fmt(zVals[0], 1)}<span class="slider-unit">mm</span>`;
+
+      // Stats bar
+      const allV = allRows.map(r => r[voltagCol]);
+      const xs = allRows.map(r => r.X), ys = allRows.map(r => r.Y);
+
+      // Use reduce instead of spread to avoid stack overflow on large arrays
+      globalXRange = [xs.reduce((a, b) => Math.min(a, b)), xs.reduce((a, b) => Math.max(a, b))];
+      globalYRange = [ys.reduce((a, b) => Math.min(a, b)), ys.reduce((a, b) => Math.max(a, b))];
+      globalVRange = [allV.reduce((a, b) => Math.min(a, b)), allV.reduce((a, b) => Math.max(a, b))];
+
+      document.getElementById('s-points').textContent = allRows.length;
+      document.getElementById('s-xrange').textContent = fmtRange(globalXRange[0], globalXRange[1], ' mm');
+      document.getElementById('s-yrange').textContent = fmtRange(globalYRange[0], globalYRange[1], ' mm');
+      document.getElementById('s-zrange').textContent = fmtRange(zVals[0], zVals[zVals.length - 1], ' mm');
+      document.getElementById('s-erange').textContent = fmtRange(eVals[0], eVals[eVals.length - 1], '°');
+      document.getElementById('s-vrange').textContent = fmtRange(globalVRange[0], globalVRange[1], ' V');
+
+      document.getElementById('controls').style.display = '';
+      document.getElementById('z-controls').style.display = '';
+      document.getElementById('plot-buttons').style.display = 'flex';
+      document.getElementById('stats-bar').style.display = '';
+      document.getElementById('empty').style.display = 'none';
+
+      setStatus(`${allRows.length} rows loaded`, 'ok');
+      savedCamera = DEFAULT_CAMERA;
+      // rAF ensures sidebar layout is flushed before Plotly measures #plot
+      requestAnimationFrame(() => {
+        renderPlot(0, 0);
+        // Attach camera listener after Plotly has initialized the div
+        document.getElementById('plot').on('plotly_relayout', (eventData) => {
+          if (eventData['scene.camera']) {
+            savedCamera = eventData['scene.camera'];
+          }
+        });
+      });
+    }
+
+    // ─── Plot Rendering ───────────────────────────────────────────────────────────
+    function update3DOnlyButtons() {
+      const is2d = plotMode === '2d';
+      document.getElementById('btn-reset').style.display = is2d ? 'none' : '';
+      document.getElementById('btn-wireframe').style.display = is2d ? 'none' : '';
+      document.getElementById('btn-2d').classList.toggle('active', is2d);
+    }
+
+    function renderPlot(eIdx, zIdx, resetCamera = false) {
+      if (plotMode === '2d') {
+        render2D(eIdx, zIdx);
+        return;
+      }
+      render3D(eIdx, zIdx, resetCamera);
+    }
+
+    function render2D(eIdx, zIdx) {
+      const eVal = eVals[eIdx];
+      const zVal = zVals[zIdx];
+      const slice = allRows.filter(r => r.E === eVal && r.Z === zVal);
+      const xUniq = uniq(slice.map(r => r.X));
+      const yUniq = uniq(slice.map(r => r.Y));
+      const zMatrix = yUniq.map(y =>
+        xUniq.map(x => {
+          const pt = slice.find(r => r.X === x && r.Y === y);
+          return pt ? pt[voltagCol] : null;
+        })
+      );
+
+      const heatmap = {
+        type: 'heatmap',
+        x: xUniq,
+        y: yUniq,
+        z: zMatrix,
+        colorscale: [
+          [0.0, '#0d1117'],
+          [0.15, '#0e3258'],
+          [0.35, '#0369a1'],
+          [0.55, '#00d4ff'],
+          [0.75, '#7c3aed'],
+          [1.0, '#f85149'],
+        ],
+        zmin: globalVRange[0],
+        zmax: globalVRange[1],
+        colorbar: {
+          title: { text: voltagCol, font: { color: '#8b949e', size: 11 } },
+          tickfont: { color: '#8b949e', size: 10 },
+          bgcolor: 'rgba(0,0,0,0)',
+          bordercolor: '#30363d',
+          thickness: 14,
+        },
+        hovertemplate:
+          '<b>X:</b> %{x} mm<br>' +
+          '<b>Y:</b> %{y} mm<br>' +
+          '<b>Voltage:</b> %{z:.4f} V<br>' +
+          `<span style="color:#8b949e">Z Height: ${zVal} mm | Tilt: ${eVal}°</span>` +
+          '<extra></extra>',
+      };
+
+      const layout = {
+        paper_bgcolor: '#161b22',
+        plot_bgcolor: '#0d1117',
+        margin: { l: 60, r: 30, t: 40, b: 60 },
+        title: {
+          text: currentFileName,
+          font: { color: '#e6edf3', size: 16 },
+          x: 0.5,
+          xref: 'paper',
+          xanchor: 'center',
+        },
+        xaxis: {
+          title: { text: 'X (mm)', font: { color: '#8b949e', size: 11 } },
+          tickfont: { color: '#8b949e', size: 10 },
+          gridcolor: '#21262d',
+          zerolinecolor: '#30363d',
+          color: '#8b949e',
+        },
+        yaxis: {
+          title: { text: 'Y (mm)', font: { color: '#8b949e', size: 11 } },
+          tickfont: { color: '#8b949e', size: 10 },
+          gridcolor: '#21262d',
+          zerolinecolor: '#30363d',
+          color: '#8b949e',
+          scaleanchor: 'x',
+          scaleratio: 1,
+        },
+        annotations: [
+          {
+            text: `<b>Z Height:</b> ${zVal.toFixed(1)} mm`,
+            font: { color: '#e6edf3', size: 12 },
+            showarrow: false,
+            x: 0.02, y: 0.98, xref: 'paper', yref: 'paper', align: 'left'
+          },
+          {
+            text: `<b>Tilt:</b> ${eVal.toFixed(1)}°`,
+            font: { color: '#e6edf3', size: 12 },
+            showarrow: false,
+            x: 0.02, y: 0.93, xref: 'paper', yref: 'paper', align: 'left'
+          }
+        ],
+      };
+
+      Plotly.react('plot', [heatmap], layout, {
+        responsive: true,
+        displaylogo: false,
+        modeBarButtonsToRemove: ['toImage'],
+      });
+    }
+
+    function render3D(eIdx, zIdx, resetCamera = false) {
+      if (resetCamera) savedCamera = DEFAULT_CAMERA;
+      const eVal = eVals[eIdx];
+      const zVal = zVals[zIdx];
+
+      const slice = allRows.filter(r => r.E === eVal && r.Z === zVal);
+
+      const xUniq = uniq(slice.map(r => r.X));
+      const yUniq = uniq(slice.map(r => r.Y));
+
+      // Build Z matrix (rows = Y, cols = X)
+      const zMatrix = yUniq.map(y =>
+        xUniq.map(x => {
+          const pt = slice.find(r => r.X === x && r.Y === y);
+          return pt ? pt[voltagCol] : null;
+        })
+      );
+
+      const allV = slice.map(r => r[voltagCol]).filter(v => v != null);
+
+      const surface = {
+        type: 'surface',
+        x: xUniq,
+        y: yUniq,
+        z: zMatrix,
+        colorscale: [
+          [0.0, '#0d1117'],
+          [0.15, '#0e3258'],
+          [0.35, '#0369a1'],
+          [0.55, '#00d4ff'],
+          [0.75, '#7c3aed'],
+          [1.0, '#f85149'],
+        ],
+        cmin: globalVRange[0],
+        cmax: globalVRange[1],
+        colorbar: {
+          title: { text: voltagCol, font: { color: '#8b949e', size: 11 } },
+          tickfont: { color: '#8b949e', size: 10 },
+          bgcolor: 'rgba(0,0,0,0)',
+          bordercolor: '#30363d',
+          thickness: 14,
+        },
+        hovertemplate:
+          '<b>X:</b> %{x} mm<br>' +
+          '<b>Y:</b> %{y} mm<br>' +
+          '<b>Voltage:</b> %{z:.4f} V<br>' +
+          `<span style="color:#8b949e">Z Height: ${zVal} mm | Tilt: ${eVal}°</span>` +
+          '<extra></extra>',
+        contours: {
+          x: { show: document.getElementById('btn-wireframe').classList.contains('active'), color: '#8b949e', width: 1, usecolormap: false },
+          y: { show: document.getElementById('btn-wireframe').classList.contains('active'), color: '#8b949e', width: 1, usecolormap: false },
+          z: { show: true, usecolormap: true, highlightcolor: '#00d4ff', project: { z: false } }
+        },
+        lighting: { ambient: 0.7, diffuse: 0.9, specular: 0.2 },
+      };
+
+      if (document.getElementById('btn-wireframe').classList.contains('active')) {
+        surface.opacity = 0.8;
+      }
+
+      const layout = {
+        paper_bgcolor: '#161b22',
+        plot_bgcolor: '#161b22',
+        margin: { l: 0, r: 0, t: 40, b: 0 },
+        uirevision: resetCamera ? Math.random() : 'true',
+        title: {
+          text: currentFileName,
+          font: { color: '#e6edf3', size: 16 },
+          x: 0.5,
+          xref: 'paper',
+          xanchor: 'center',
+        },
+        annotations: [
+          {
+            text: `<b>Z Height:</b> ${zVal.toFixed(1)} mm`,
+            font: { color: '#e6edf3', size: 12 },
+            showarrow: false,
+            x: 0.05, y: 0.95, xref: 'paper', yref: 'paper', align: 'left'
+          },
+          {
+            text: `<b>Tilt:</b> ${eVal.toFixed(1)}°`,
+            font: { color: '#e6edf3', size: 12 },
+            showarrow: false,
+            x: 0.05, y: 0.90, xref: 'paper', yref: 'paper', align: 'left'
+          }
+        ],
+        scene: {
+          bgcolor: '#0d1117',
+          xaxis: Object.assign(axStyle('X (mm)'), { range: globalXRange }),
+          yaxis: Object.assign(axStyle('Y (mm)'), { range: globalYRange }),
+          zaxis: Object.assign(axStyle(voltagCol, 4), { range: globalVRange }),
+          camera: savedCamera,
+        },
+      };
+
+      Plotly.react('plot', [surface], layout, {
+        responsive: true,
+        displaylogo: false,
+        modeBarButtonsToRemove: ['toImage', 'orbitRotation'],
+      });
+    }
+
+    function axStyle(title, decs = 1) {
+      return {
+        title: { text: title, font: { color: '#8b949e', size: 11 } },
+        tickfont: { color: '#8b949e', size: 10 },
+        gridcolor: '#21262d',
+        zerolinecolor: '#30363d',
+        backgroundcolor: '#0d1117',
+        showbackground: true,
+        tickformat: decs === 4 ? '.4f' : `.${decs}f`,
+      };
+    }
+
+    // ─── Slider Events ────────────────────────────────────────────────────────────
+    document.getElementById('e-slider').addEventListener('input', function () {
+      const idx = +this.value;
+      document.getElementById('e-val').innerHTML = `${fmt(eVals[idx], 1)}<span class="slider-unit">°</span>`;
+      renderPlot(idx, +document.getElementById('z-slider').value, false);
+    });
+
+    document.getElementById('z-slider').addEventListener('input', function () {
+      const idx = +this.value;
+      document.getElementById('z-val').innerHTML = `${fmt(zVals[idx], 1)}<span class="slider-unit">mm</span>`;
+      renderPlot(+document.getElementById('e-slider').value, idx, false);
+    });
+
+    document.getElementById('btn-2d').addEventListener('click', () => {
+      plotMode = plotMode === '2d' ? '3d' : '2d';
+      update3DOnlyButtons();
+      renderPlot(+document.getElementById('e-slider').value, +document.getElementById('z-slider').value, false);
+    });
+
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      renderPlot(+document.getElementById('e-slider').value, +document.getElementById('z-slider').value, true);
+    });
+
+    document.getElementById('btn-wireframe').addEventListener('click', function () {
+      this.classList.toggle('active');
+      renderPlot(+document.getElementById('e-slider').value, +document.getElementById('z-slider').value, false);
+    });
+
+    document.getElementById('btn-download').addEventListener('click', () => {
+      const eVal = eVals[+document.getElementById('e-slider').value];
+      const zVal = zVals[+document.getElementById('z-slider').value];
+      const modeSuffix = plotMode === '2d' ? 'Heatmap' : '3D';
+      const fileName = `DMM_${modeSuffix}_Z${zVal}_E${eVal}.png`;
+
+      Plotly.downloadImage('plot', {
+        format: 'png',
+        width: 1200,
+        height: 800,
+        filename: fileName
+      });
+    });
+  </script>
+</body>
+
+</html>
