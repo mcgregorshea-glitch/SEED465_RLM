@@ -367,6 +367,9 @@ class GCodeSenderGUI:
         style.configure('GreenRing.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor=self.COLOR_ACCENT_GREEN, borderwidth=1, relief=tk.SOLID, padding=(12, 8), font=self.FONT_BODY)
         style.map('GreenRing.TButton', background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)], foreground=[('active', self.COLOR_ACCENT_GREEN)], bordercolor=[('active', self.COLOR_ACCENT_GREEN)])
 
+        style.configure('PurpleRing.TButton', background=self.COLOR_PANEL_BG, foreground=self.COLOR_TEXT_PRIMARY, bordercolor='#BA55D3', borderwidth=1, relief=tk.SOLID, padding=(12, 8), font=self.FONT_BODY)
+        style.map('PurpleRing.TButton', background=[('active', '#2c333e'), ('pressed', self.COLOR_BLACK)], foreground=[('active', '#BA55D3')], bordercolor=[('active', '#BA55D3')])
+
         # --- Primary Action Button (e.g., Connect, Start) ---
         style.configure('Primary.TButton', background=self.COLOR_ACCENT_CYAN, foreground=self.COLOR_BLACK, font=self.FONT_BODY_BOLD)
         style.map('Primary.TButton', background=[('active', '#00eaff'), ('pressed', self.COLOR_ACCENT_CYAN)], foreground=[('active', self.COLOR_BLACK), ('pressed', self.COLOR_BLACK)], bordercolor=[('active', self.COLOR_ACCENT_CYAN)])
@@ -486,6 +489,15 @@ class GCodeSenderGUI:
                         background=self.COLOR_PANEL_BG,
                         foreground=self.COLOR_PENDING_RING,
                         font=self.FONT_BODY_BOLD)
+
+        style.configure('Purple.TLabelframe',
+                        background=self.COLOR_PANEL_BG,
+                        bordercolor='#BA55D3',
+                        relief=tk.SOLID, borderwidth=3)
+        style.configure('Purple.TLabelframe.Label',
+                        background=self.COLOR_PANEL_BG,
+                        foreground='#BA55D3',
+                        font=self.FONT_BODY_BOLD)
         
         # --- Scrollbar Style ---
         style.configure('TScrollbar',
@@ -501,6 +513,7 @@ class GCodeSenderGUI:
 
         # --- Core Application Attributes ---
         self.serial_connection = None
+        self.hardware_fault = False
         self.gcode_filepath = None # Store path to G-code file instead of contents
         self.processed_gcode = []
         self.is_sending = False
@@ -2290,6 +2303,7 @@ class GCodeSenderGUI:
 
                 self.message_queue.put(("CONNECTED", (serial_conn, found_port, baudrate, initial_position)))
             else:
+                self.hardware_fault = False # Clear fault on attempt
                 if not self.cancel_connect_event.is_set(): self.message_queue.put(("CONNECT_FAIL", "No responsive printer found."))
                 else: self.message_queue.put(("CONNECT_CANCELLED", None))
         finally: self.message_queue.put(("CONNECT_ATTEMPT_FINISHED", None))
@@ -2345,9 +2359,12 @@ class GCodeSenderGUI:
         self.progress_var.set(0.0)
         self.progress_label_var.set("Progress: Idle")
 
-        # Reset the known position and update the display.
+        # Reset the known position, setup flags, and update the display.
         self.last_cmd_abs_x, self.last_cmd_abs_y, self.last_cmd_abs_z = None, None, None
+        self.center_marked = False
+        self.rotation_crash_test_complete = False
         self._update_all_displays()
+        self._update_section_borders()
 
 
     # --- G-Code Sending & Control ---
@@ -4180,10 +4197,18 @@ class GCodeSenderGUI:
         """Updates the LabelFrame border colour to green when each section's setup condition is met."""
         GREEN = 'Green.TLabelframe'
         YELLOW = 'Yellow.TLabelframe'
+        PURPLE = 'Purple.TLabelframe'
 
         # CONNECTION — green once printer is connected
         if hasattr(self, '_conn_frame'):
-            self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else YELLOW)
+            if getattr(self, 'hardware_fault', False):
+                self._conn_frame.configure(style=PURPLE)
+                if hasattr(self, 'connect_button'):
+                    self.connect_button.configure(style='PurpleRing.TButton')
+            else:
+                self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else YELLOW)
+                if hasattr(self, 'connect_button') and not bool(self.serial_connection):
+                    self.connect_button.configure(style='YellowRing.TButton')
 
         # MEASUREMENT — green when DMM connected AND (Log to CSV off OR file path set)
         if hasattr(self, '_meas_frame'):
@@ -4193,7 +4218,13 @@ class GCodeSenderGUI:
         # SETUP — green when center has been marked AND collision test completed
         if hasattr(self, '_setup_frame'):
             setup_ok = self.center_marked and self.rotation_crash_test_complete
-            self._setup_frame.configure(style=GREEN if setup_ok else YELLOW)
+            if not self.center_marked:
+                self._setup_frame.configure(style=PURPLE)
+            else:
+                self._setup_frame.configure(style=GREEN if setup_ok else YELLOW)
+            
+            if hasattr(self, 'mark_center_button'):
+                self.mark_center_button.configure(style='GreenRing.TButton' if self.center_marked else 'PurpleRing.TButton')
             
         # EXECUTION CONTROL — green when gcode is loaded
         if hasattr(self, '_ctrl_frame'):
@@ -4202,6 +4233,7 @@ class GCodeSenderGUI:
 
         if hasattr(self, 'collision_test_button'):
             self.collision_test_button.configure(style='GreenRing.TButton' if self.rotation_crash_test_complete else 'YellowRing.TButton')
+
 
     def _mark_current_as_center(self):
         """
@@ -4214,6 +4246,9 @@ class GCodeSenderGUI:
              self.log_message("Cannot mark center: No known last position.", "WARN")
              messagebox.showwarning("Mark Center Failed", "Cannot mark center.\nNo known printer position.\nTry homing or moving the printer first.")
              return
+             
+        # Auto-trigger "set tilt as level" before proceeding
+        self._mark_tilt_as_level()
              
         try:
             self.center_x_var.set(f"{self.last_cmd_abs_x:.2f}")
@@ -4640,11 +4675,11 @@ class GCodeSenderGUI:
     def _stop_collision_test(self):
         """
         Emergency stop specific to the collision avoidance test.
-        Sends M112 immediately to kill all motion, then resets the test
-        UI state without fully disconnecting (so the user can reconnect
-        or keep the connection alive for recovery).
+        Sends M112 immediately to kill all motion, fully disconnects,
+        and paints UI purple to indicate hardware fault requirement.
         """
         self.log_message("!!! COLLISION TEST ABORTED — Emergency Stop !!!", "CRITICAL")
+        self.hardware_fault = True
 
         # Signal the worker thread to abort immediately
         self.is_collision_test_running = False
@@ -4654,7 +4689,15 @@ class GCodeSenderGUI:
         # Invalidate the test result
         self.rotation_crash_test_complete = False
 
-        # Send M112 hard-stop directly — bypass the worker queue
+        if hasattr(self, 'lbl_test_status') and self.lbl_test_status.winfo_exists():
+            self.lbl_test_status.config(
+                text="Test Failed - please cycle power on the test machine, unplug the USB from the Raspberry Pi, and reconnect.", 
+                fg=self.COLOR_ACCENT_RED,
+                font=("Rajdhani", 12, "bold"),
+                wraplength=400
+            )
+
+        # Send M112 hard-stop directly
         if self.serial_connection:
             try:
                 self.serial_connection.write(b'M112\n')
@@ -4668,14 +4711,16 @@ class GCodeSenderGUI:
         else:
             self.log_message("Not connected — no M112 sent.", "WARN")
 
+        # Automatically disconnect the printer
+        self.disconnect_printer(silent=True)
+
         # Update status indicators
         self.status_indicator.set_status("error")
         self.header_status_indicator.set_status("error")
 
-        # Reset the worker flags and test UI
+        # Reset the worker flags and update display colors
         self.is_manual_command_running = False
         self.root.after(0, self._update_all_displays)
-        self.root.after(0, self._reset_test_ui)
         self.root.after(0, self._update_section_borders)
 
         # Clear the stop event so subsequent manual commands can run
