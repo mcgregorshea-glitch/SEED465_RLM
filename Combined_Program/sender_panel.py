@@ -2328,11 +2328,20 @@ class GCodeSenderGUI:
              self._cancel_connection_attempt()
              return
              
-        # Prevent disconnection while a job is running.
-        if self.is_sending or self.is_manual_command_running:
+        # For user-initiated disconnects, refuse while a job is actively running.
+        # Forced/silent disconnects (e.g. CONNECTION_LOST) must bypass this guard
+        # so the GUI is always reset regardless of runtime state.
+        if not silent and (self.is_sending or self.is_manual_command_running):
             self.log_message("Cannot disconnect while busy.", "WARN")
             messagebox.showwarning("Busy", "Please stop the current operation before disconnecting.")
             return
+
+        # For forced disconnects, stop any active operations before resetting.
+        if silent:
+            self.stop_event.set()
+            self.is_sending = False
+            self.is_manual_command_running = False
+            self.is_paused = False
             
         if self.serial_connection and self.serial_connection.is_open:
             try:
@@ -2358,6 +2367,7 @@ class GCodeSenderGUI:
         self.baud_entry.configure(state=tk.NORMAL)
         
         self.start_button.config(state=tk.DISABLED)
+        self.pause_resume_button.config(text="Pause", state=tk.DISABLED)
         self._set_manual_controls_state(tk.DISABLED)
         self._set_goto_controls_state(tk.DISABLED)
         self._set_terminal_controls_state(tk.DISABLED)
