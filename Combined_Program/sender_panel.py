@@ -2237,14 +2237,15 @@ class GCodeSenderGUI:
             if connection_cancelled: self.message_queue.put(("CONNECT_CANCELLED", None))
             elif serial_conn and found_port: 
                 # Send M302 P1 S0 to explicitly allow cold extrusion regardless of temp
-                self.queue_message("Sending configuration commands (Cold Extrusion, Idle Timeout)...")
+                self.queue_message("Sending configuration commands (Cold Extrusion, Idle Timeout, Endstops)...")
                 try:
                     # M302 P1 S0: Allow cold extrusion
                     # M84 S900: Set motor idle timeout to 15 minutes (900 seconds)
-                    serial_conn.write(b'M302 P1 S0\nM84 S900\n')
+                    # M120: Enable endstop detection during all moves (not just homing)
+                    serial_conn.write(b'M302 P1 S0\nM84 S900\nM120\n')
                     serial_conn.flush()
                     
-                    # We expect two 'ok' responses, wait for them
+                    # We expect three 'ok' responses (M302, M84, M120), wait for them
                     config_oks = 0
                     config_start_time = time.time()
                     config_response_buffer = ""
@@ -2252,11 +2253,11 @@ class GCodeSenderGUI:
                         if serial_conn.in_waiting > 0:
                             config_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore')
                             config_oks = config_response_buffer.lower().count('ok')
-                            if config_oks >= 2:
+                            if config_oks >= 3:
                                 break
                         time.sleep(0.05)
                         
-                    if config_oks < 2:
+                    if config_oks < 3:
                         self.queue_message("Warning: Not all setup 'ok's received. Configuration might be incomplete.", "WARN")
                     else:
                         self.queue_message("Initial printer configuration confirmed.", "SUCCESS")
@@ -3240,8 +3241,8 @@ class GCodeSenderGUI:
         Sets the 'target' position to the user-defined 'center' coordinates.
 
         This updates the internal target model and all GUI displays, including
-        the input fields and canvas markers. It does *not* send a command to
-        the printer; it only stages the coordinates for a subsequent 'Go' command.
+        the input fields and canvas markers. It then automatically triggers
+        the 'Go To' movement command.
         """
         try:
             # 1. Read the center coordinates from their StringVars.
@@ -3271,6 +3272,9 @@ class GCodeSenderGUI:
             self.goto_y_entry.delete(0, tk.END); self.goto_y_entry.insert(0, display_y)
             self.goto_z_entry.delete(0, tk.END); self.goto_z_entry.insert(0, display_z)
             self.goto_e_entry.delete(0, tk.END); self.goto_e_entry.insert(0, display_e)
+
+            # 5. Trigger the move
+            self._go_to_position()
 
         except ValueError:
             self.log_message("Cannot 'Go to Center': Invalid center coordinates.", "ERROR")
