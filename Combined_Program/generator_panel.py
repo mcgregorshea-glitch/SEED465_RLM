@@ -9,7 +9,7 @@ from typing import Any
 PRINTER_LIMITS = {
     'x': 110.0,  # 220mm / 2
     'y': 110.0,  # 220mm / 2
-    'z_max': 140.0,
+    'z_max': 130.0,
     'z_min': 0.0,
     'rot_max': 90.0,
     'rot_min': -90.0,

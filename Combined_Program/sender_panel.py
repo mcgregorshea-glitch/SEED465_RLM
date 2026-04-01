@@ -556,7 +556,7 @@ class GCodeSenderGUI:
 
         # --- Printer Physical Bounds (in mm) ---
         # E is 'Rotation' (repurposed extruder), units are now DEGREES. Firmware must be configured accordingly (e.g., M92 E8.888).
-        self.PRINTER_BOUNDS: Dict[str, float] = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 140, 'e_min': -90, 'e_max': 90 }
+        self.PRINTER_BOUNDS: Dict[str, float] = { 'x_min': 0, 'x_max': 220, 'y_min': 0, 'y_max': 220, 'z_min': 0, 'z_max': 130, 'e_min': -90, 'e_max': 90 }
 
         # --- Tkinter StringVars (for dynamically updating GUI labels) ---
         self.file_path_var = tk.StringVar(value="No file selected")
