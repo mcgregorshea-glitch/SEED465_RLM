@@ -1193,11 +1193,11 @@ class GCodeSenderGUI:
         jog_grid_frame.columnconfigure(1, weight=1, uniform="jog_grid")
         jog_grid_frame.columnconfigure(2, weight=1, uniform="jog_grid")
         
-        self.jog_y_pos = ttk.Button(jog_grid_frame, text="Y+", style='Jog.TButton', command=lambda: self._jog('Y', 1), state=tk.DISABLED); self.jog_y_pos.grid(row=0, column=1, padx=2, pady=2, sticky="nsew")
+        self.jog_y_neg = ttk.Button(jog_grid_frame, text="Y-", style='Jog.TButton', command=lambda: self._jog('Y', -1), state=tk.DISABLED); self.jog_y_neg.grid(row=0, column=1, padx=2, pady=2, sticky="nsew")
         self.jog_x_neg = ttk.Button(jog_grid_frame, text="X-", style='Jog.TButton', command=lambda: self._jog('X', -1), state=tk.DISABLED); self.jog_x_neg.grid(row=1, column=0, padx=2, pady=2, sticky="nsew")
         self.home_button = ttk.Button(jog_grid_frame, text="⌂", style='Home.TButton', command=self._home_all, state=tk.DISABLED); self.home_button.grid(row=1, column=1, padx=2, pady=2, sticky="nsew")
         self.jog_x_pos = ttk.Button(jog_grid_frame, text="X+", style='Jog.TButton', command=lambda: self._jog('X', 1), state=tk.DISABLED); self.jog_x_pos.grid(row=1, column=2, padx=2, pady=2, sticky="nsew")
-        self.jog_y_neg = ttk.Button(jog_grid_frame, text="Y-", style='Jog.TButton', command=lambda: self._jog('Y', -1), state=tk.DISABLED); self.jog_y_neg.grid(row=2, column=1, padx=2, pady=2, sticky="nsew")
+        self.jog_y_pos = ttk.Button(jog_grid_frame, text="Y+", style='Jog.TButton', command=lambda: self._jog('Y', 1), state=tk.DISABLED); self.jog_y_pos.grid(row=2, column=1, padx=2, pady=2, sticky="nsew")
         
         # --- E-axis jog buttons (Right Wing) ---
         e_control_frame = ttk.Frame(manual_frame, style='Panel.TFrame')
@@ -1539,7 +1539,7 @@ class GCodeSenderGUI:
         """Triggered when the user switches tabs. Refreshes the 3D plot if needed."""
         if self._is_3d_tab_active():
             # Defer slightly so the tab's canvas has finished drawing before matplotlib renders.
-            self.after(50, self._draw_3d_toolpath)
+            self.root.after(50, self._draw_3d_toolpath)
 
     def _draw_3d_toolpath(self):
         """Draws the full G-code toolpath on the 3D plot."""
@@ -2237,26 +2237,31 @@ class GCodeSenderGUI:
             if connection_cancelled: self.message_queue.put(("CONNECT_CANCELLED", None))
             elif serial_conn and found_port: 
                 # Send M302 P1 S0 to explicitly allow cold extrusion regardless of temp
-                self.queue_message("Sending M302 P1 S0 (Allow Cold Extrusion)...")
+                self.queue_message("Sending configuration commands (Cold Extrusion, Idle Timeout)...")
                 try:
-                    serial_conn.write(b'M302 P1 S0\n')
+                    # M302 P1 S0: Allow cold extrusion
+                    # M84 S900: Set motor idle timeout to 15 minutes (900 seconds)
+                    serial_conn.write(b'M302 P1 S0\nM84 S900\n')
                     serial_conn.flush()
-                    m302_ok = False
-                    m302_start_time = time.time()
-                    m302_response_buffer = ""
-                    while time.time() - m302_start_time < 5.0: # Short timeout for M302
+                    
+                    # We expect two 'ok' responses, wait for them
+                    config_oks = 0
+                    config_start_time = time.time()
+                    config_response_buffer = ""
+                    while time.time() - config_start_time < 5.0:
                         if serial_conn.in_waiting > 0:
-                            m302_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore') # type: ignore
-                            if 'ok' in m302_response_buffer.lower():
-                                m302_ok = True
+                            config_response_buffer += serial_conn.read(serial_conn.in_waiting).decode('utf-8', errors='ignore')
+                            config_oks = config_response_buffer.lower().count('ok')
+                            if config_oks >= 2:
                                 break
                         time.sleep(0.05)
-                    if not m302_ok:
-                        self.queue_message("Warning: M302 P1 S0 'ok' not received. Cold extrusion might still be enabled.", "WARN")
+                        
+                    if config_oks < 2:
+                        self.queue_message("Warning: Not all setup 'ok's received. Configuration might be incomplete.", "WARN")
                     else:
-                        self.queue_message("M302 P1 S0 confirmed.", "SUCCESS")
+                        self.queue_message("Initial printer configuration confirmed.", "SUCCESS")
                 except Exception as e:
-                    self.queue_message(f"Error sending M302 P1 S0: {e}", "ERROR")
+                    self.queue_message(f"Error during initial configuration: {e}", "ERROR")
 
                 # --- Poll Current Position via M114 ---
                 initial_position = None
@@ -2342,10 +2347,14 @@ class GCodeSenderGUI:
         self.status_indicator.set_status("off")
         self.header_status_indicator.set_status("off")
         self.footer_status_var.set("COM: -- @ --")
-        
-        self.connect_button.config(text="Connect", state=tk.NORMAL, style='YellowRing.TButton')
-        self.port_combobox.config(state="readonly")
-        self.baud_entry.config(state=tk.NORMAL)
+
+        # Use .configure() for ttk widgets — .config() is unreliable for style/text on ttk
+        self.connect_button.configure(text="Connect", style='YellowRing.TButton')
+        self.connect_button.state(['!disabled'])
+        if hasattr(self, '_conn_frame'):
+            self._conn_frame.configure(style='Yellow.TLabelframe')
+        self.port_combobox.configure(state="readonly")
+        self.baud_entry.configure(state=tk.NORMAL)
         
         self.start_button.config(state=tk.DISABLED)
         self._set_manual_controls_state(tk.DISABLED)
@@ -2940,10 +2949,10 @@ class GCodeSenderGUI:
         # Handle arrow keys first via keysym
         keysym = event.keysym
         if keysym == 'Left':
-            self._jog('E', -1)
+            self._jog('E', 1)
             return
         elif keysym == 'Right':
-            self._jog('E', 1)
+            self._jog('E', -1)
             return
         elif keysym in ('Up', 'Down'):
             self._cycle_step_size('ROT', 1 if keysym == 'Up' else -1)
@@ -2955,17 +2964,17 @@ class GCodeSenderGUI:
             return
 
         if char == 'w':
-            self._jog('Y', 1)
-        elif char == 's':
             self._jog('Y', -1)
+        elif char == 's':
+            self._jog('Y', 1)
         elif char == 'a':
             self._jog('X', -1)
         elif char == 'd':
             self._jog('X', 1)
         elif char == 'q':
-            self._jog('Z', 1)
-        elif char == 'e':
             self._jog('Z', -1)
+        elif char == 'e':
+            self._jog('Z', 1)
         elif char == 'r':
             self._cycle_step_size('XYZ', 1)
         elif char == 'f':
@@ -3283,7 +3292,7 @@ class GCodeSenderGUI:
         
         # Convert canvas pixel coordinates to world coordinates.
         world_x = bounds['x_min'] + (click_x_rel / canvas_w) * x_range if x_range != 0 else bounds['x_min']
-        world_y = bounds['y_min'] + ((canvas_h - click_y_rel) / canvas_h) * y_range if y_range != 0 else bounds['y_min'] # Y is inverted
+        world_y = bounds['y_min'] + (click_y_rel / canvas_h) * y_range if y_range != 0 else bounds['y_min'] # y=0 at top
         
         # Update the internal model for the target position.
         self.target_abs_x = max(bounds['x_min'], min(bounds['x_max'], world_x))
@@ -3307,9 +3316,8 @@ class GCodeSenderGUI:
 
         def world_to_canvas(wx, wy):
             cx = w * (wx - bounds['x_min']) / x_range
-            cy = h - (h * (wy - bounds['y_min']) / y_range) # Inverted Y
+            cy = h * (wy - bounds['y_min']) / y_range # y=0 at top
             return cx, cy
-
         # --- Draw Hash Grid & Axis Labels ---
         grid_minor = "#1a2c3a"
         grid_major = "#24404f"
@@ -3571,10 +3579,9 @@ class GCodeSenderGUI:
         # In screen coords, dy is positive downward, so South is positive dy.
         # East is positive dx. West is negative dx.
         # Therefore, South corresponds to atan2(+dy, 0) -> +90 deg.
-        # To make South 0, East +90, West -90:
-        # Our angle = 90 - atan2_angle
-        mapped_angle = 90 - angle_deg
-        
+        # To make South 0, East -90, West +90:
+        # Our angle = atan2_angle - 90
+        mapped_angle = angle_deg - 90        
         # Normalize to [-180, 180]
         if mapped_angle > 180: mapped_angle -= 360
         if mapped_angle < -180: mapped_angle += 360
@@ -3619,13 +3626,12 @@ class GCodeSenderGUI:
         self.e_canvas.create_line(cx - radius, cy, cx + radius, cy, fill=self.COLOR_BORDER, width=2)
         
         # --- Helper: convert our E-angle to screen radians ---
-        # Our 0° = South (bottom). +angle = toward East (+90 is East), -angle = toward West (-90 is West).
+        # Our 0° = South (bottom). +angle = toward West (+90 is West), -angle = toward East (-90 is East).
         # Screen: radians measured from East=0, CW positive (because Y is inverted).
         # South is PI/2 in screen coords. East is 0. West is PI.
-        # screen_rad = PI/2 - radians(our_angle)
+        # screen_rad = PI/2 + radians(our_angle)
         def e_to_screen_rad(e_deg: float) -> float:
-            return math.pi / 2 - math.radians(e_deg)
-        
+            return math.pi / 2 + math.radians(e_deg)        
         # --- Ticks at key positions ---
         # To match the image, don't show + signs, and just label limits and zero, but ticks every 45
         tick_angles = [
@@ -3646,12 +3652,12 @@ class GCodeSenderGUI:
             if is_major and label:
                 lx = cx + (radius + 14) * math.cos(rad)
                 # Adjust label heights slightly
-                if angle == -90: # West
-                    ly = cy - 2
-                    lx -= 4 # pull left slightly
-                elif angle == 90: # East
+                if angle == -90: # East
                     ly = cy - 2
                     lx += 4 # push right slightly
+                elif angle == 90: # West
+                    ly = cy - 2
+                    lx -= 4 # pull left slightly
                 else:
                     ly = cy + (radius + 14) * math.sin(rad)
                 self.e_canvas.create_text(lx, ly, text=label, fill=self.COLOR_TEXT_SECONDARY, font=("Inter", 8))
@@ -4805,49 +4811,46 @@ class GCodeSenderGUI:
             speed_xy = 1000 # mm/min
             speed_e = 500 # deg/min slowly
             
+            def send_wait(cmd_str, timeout_s=30):
+                lines = [c.strip() for c in cmd_str.split('\n') if c.strip()]
+                for c in lines:
+                    self.serial_connection.write((c + '\n').encode('utf-8'))
+                for _ in lines:
+                    if not self._wait_for_ok(timeout=timeout_s):
+                        raise Exception(f"Timeout waiting for OK")
+
             # Step 1: Move Z axis to scan's minimum Z value first
             update_status(f"Moving to Min Z ({min_z})...")
-            cmd = f"G90\nG1 Z{min_z} F{speed_xy}\nM400\n"
-            self.serial_connection.write(cmd.encode('utf-8'))
-            if not self._wait_for_ok(timeout=30): raise Exception("Move to Min Z timeout")
+            send_wait(f"G90\nG1 Z{min_z} F{speed_xy}\nM400", timeout_s=30)
 
             # Step 2: Move to X,Y center
             update_status(f"Moving to Center ({cx}, {cy})...")
-            cmd = f"G1 X{cx} Y{cy} F{speed_xy}\nM400\n"
-            self.serial_connection.write(cmd.encode('utf-8'))
-            if not self._wait_for_ok(timeout=30): raise Exception("Move to Center timeout")
+            send_wait(f"G1 X{cx} Y{cy} F{speed_xy}\nM400", timeout_s=30)
 
             # Step 2.5: Home X, then Y, then Z sequentially
             update_status("Homing X axis...")
-            self.serial_connection.write(b"G28 X\nM400\n")
-            if not self._wait_for_ok(timeout=60): raise Exception("Home X timeout")
+            send_wait("G28 X\nM400", timeout_s=60)
 
             update_status("Homing Y axis...")
-            self.serial_connection.write(b"G28 Y\nM400\n")
-            if not self._wait_for_ok(timeout=60): raise Exception("Home Y timeout")
+            send_wait("G28 Y\nM400", timeout_s=60)
 
             update_status("Homing Z axis...")
-            self.serial_connection.write(b"G28 Z\nM400\n")
-            if not self._wait_for_ok(timeout=60): raise Exception("Home Z timeout")
+            send_wait("G28 Z\nM400", timeout_s=60)
 
             if found_e:
                 # Step 3: Move to Center X, Y, Z before tilting
-                update_status(f"Moving to Center XYZ ({cx}, {cy}, {cz}) before tilt...")
-                cmd = f"G90\nG1 X{cx} Y{cy} Z{cz} F{speed_xy}\nM400\n"
-                self.serial_connection.write(cmd.encode('utf-8'))
-                if not self._wait_for_ok(timeout=30): raise Exception("Move to Center XYZ before tilt timeout")
+                update_status("moving to center position")
+                send_wait(f"G90\nG1 X{cx} Y{cy} Z{cz} F{speed_xy}\nM400", timeout_s=30)
 
                 # Step 4: Tilt to Max E slowly
-                update_status(f"Tilting to Max ({max_e:.1f}°)...")
-                cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed_e}\nM400\n")
-                self.serial_connection.write(cmd.encode('utf-8'))
-                if not self._wait_for_ok(timeout=60): raise Exception("Tilt Max timeout")
+                update_status(f"Moving to max tilt angle ({max_e:.1f}°)...")
+                cmd = self._apply_e_conversion(f"G1 E{max_e:.2f} F{speed_e}\nM400")
+                send_wait(cmd, timeout_s=60)
                 
                 # Step 4: Move to Min E slowly
-                update_status(f"Tilting to Min ({min_e:.1f}°)...")
-                cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed_e}\nM400\n")
-                self.serial_connection.write(cmd.encode('utf-8'))
-                if not self._wait_for_ok(timeout=60): raise Exception("Tilt Min timeout")
+                update_status(f"Moving to min tilt angle ({min_e:.1f}°)...")
+                cmd = self._apply_e_conversion(f"G1 E{min_e:.2f} F{speed_e}\nM400")
+                send_wait(cmd, timeout_s=60)
 
             # Step 5: Hold for Pause Time OR Multimeter Reading at Min E
             if getattr(self, 'is_dmm_connected', False) and self.auto_measure_enabled.get():
@@ -4867,10 +4870,9 @@ class GCodeSenderGUI:
                 time.sleep(sec)
 
             # Step 6: Return to the "center position" for X,Y,Z, and E.
-            update_status("Returning to Center XYZ + 0°...")
-            cmd = self._apply_e_conversion(f"G1 Z{cz} X{cx} Y{cy} E0 F{speed_xy}\nM400\n")
-            self.serial_connection.write(cmd.encode('utf-8'))
-            if not self._wait_for_ok(timeout=30): raise Exception("Return Center timeout")
+            update_status("moving to center position")
+            cmd = self._apply_e_conversion(f"G1 Z{cz} X{cx} Y{cy} E0 F{speed_xy}\nM400")
+            send_wait(cmd, timeout_s=30)
 
             self.rotation_crash_test_complete = True
             self._update_section_borders()
