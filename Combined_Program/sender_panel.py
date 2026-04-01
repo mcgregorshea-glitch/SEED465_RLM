@@ -2322,6 +2322,8 @@ class GCodeSenderGUI:
             silent (bool): If True, suppresses logging of disconnection errors.
                            Useful when called during a forced shutdown.
         """
+        self.log_message(f"[DIAG] disconnect_printer called. silent={silent}, is_sending={self.is_sending}, is_manual={self.is_manual_command_running}, serial_conn={self.serial_connection is not None}", "WARN")
+
         # If a connection is in progress, cancel it instead.
         if self.connect_button['state'] == tk.DISABLED and not self.serial_connection and hasattr(self, 'cancel_connect_button') and self.cancel_connect_button.winfo_ismapped():
              self.log_message("Disconnect during connect - Cancelling.", "WARN")
@@ -2351,6 +2353,7 @@ class GCodeSenderGUI:
                     self.log_message(f"Disconnect error: {e}", "ERROR")
             
         self.serial_connection = None
+        self.log_message("[DIAG] serial_connection cleared. Resetting GUI now.", "WARN")
         
         # --- Reset GUI to "Disconnected" state ---
         self.connection_status_var.set("Disconnected")
@@ -2362,6 +2365,7 @@ class GCodeSenderGUI:
         self.connect_button.configure(text="Connect", style='YellowRing.TButton')
         self.connect_button.state(['!disabled'])
         if hasattr(self, '_conn_frame'):
+            self._conn_frame.configure(style='Yellow.TLabelframe')
             self._conn_frame.configure(style='Yellow.TLabelframe')
         self.port_combobox.configure(state="readonly")
         self.baud_entry.configure(state=tk.NORMAL)
