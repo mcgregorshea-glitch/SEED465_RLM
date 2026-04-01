@@ -252,6 +252,8 @@ class PatternGeneratorGUI:
         # ===== RIGHT PANEL - VISUALIZATION =====
         self.create_preview_panel(right_panel)
 
+        self._load_last_parameters()
+
         # Trigger initial symmetric UI state & preview
         self._on_x_symmetric_toggle()
         self._on_y_symmetric_toggle()
@@ -652,6 +654,91 @@ class PatternGeneratorGUI:
             self.rot_offset_label, self.rot_offset,
             self.rot_min, self.rot_max, self.rot_offset, "0", "0"
         )
+
+    def _save_last_parameters(self):
+        try:
+            import json
+            settings = {
+                'profile_name': self.profile_name.get(),
+                'include_timestamp': self.include_timestamp.get(),
+                'export_format': self.export_format.get(),
+                
+                'x_symmetric': self.x_symmetric.get(),
+                'x_min': self.x_min.get(),
+                'x_max': self.x_max.get(),
+                'x_offset': self.x_offset.get(),
+                'x_step': self.x_step.get(),
+                
+                'y_symmetric': self.y_symmetric.get(),
+                'y_min': self.y_min.get(),
+                'y_max': self.y_max.get(),
+                'y_offset': self.y_offset.get(),
+                'y_step': self.y_step.get(),
+                
+                'z_symmetric': self.z_symmetric.get(),
+                'z_min': self.z_min.get(),
+                'z_max': self.z_max.get(),
+                'z_offset': self.z_offset.get(),
+                'z_step': self.z_step.get(),
+                
+                'rot_symmetric': self.rot_symmetric.get(),
+                'rot_min': self.rot_min.get(),
+                'rot_max': self.rot_max.get(),
+                'rot_offset': self.rot_offset.get(),
+                'rot_step': self.rot_step.get(),
+                
+                'travelspeed': self.travelspeed.get(),
+                'pause_time': self.pause_time.get()
+            }
+            with open('last_scan_profile.json', 'w') as f:
+                json.dump(settings, f)
+        except Exception as e:
+            print("Error saving settings:", e)
+
+    def _load_last_parameters(self):
+        try:
+            import json
+            import os
+            if os.path.exists('last_scan_profile.json'):
+                with open('last_scan_profile.json', 'r') as f:
+                    settings = json.load(f)
+                
+                def set_entry(widget, value):
+                    widget.delete(0, 'end')
+                    widget.insert(0, str(value))
+                    
+                if 'profile_name' in settings: set_entry(self.profile_name, settings['profile_name'])
+                if 'include_timestamp' in settings: self.include_timestamp.set(settings['include_timestamp'])
+                if 'export_format' in settings: self.export_format.set(settings['export_format'])
+                
+                if 'x_symmetric' in settings: self.x_symmetric.set(settings['x_symmetric'])
+                if 'x_min' in settings: set_entry(self.x_min, settings['x_min'])
+                if 'x_max' in settings: set_entry(self.x_max, settings['x_max'])
+                if 'x_offset' in settings: set_entry(self.x_offset, settings['x_offset'])
+                if 'x_step' in settings: set_entry(self.x_step, settings['x_step'])
+                
+                if 'y_symmetric' in settings: self.y_symmetric.set(settings['y_symmetric'])
+                if 'y_min' in settings: set_entry(self.y_min, settings['y_min'])
+                if 'y_max' in settings: set_entry(self.y_max, settings['y_max'])
+                if 'y_offset' in settings: set_entry(self.y_offset, settings['y_offset'])
+                if 'y_step' in settings: set_entry(self.y_step, settings['y_step'])
+                
+                if 'z_symmetric' in settings: self.z_symmetric.set(settings['z_symmetric'])
+                if 'z_min' in settings: set_entry(self.z_min, settings['z_min'])
+                if 'z_max' in settings: set_entry(self.z_max, settings['z_max'])
+                if 'z_offset' in settings: set_entry(self.z_offset, settings['z_offset'])
+                if 'z_step' in settings: set_entry(self.z_step, settings['z_step'])
+                
+                if 'rot_symmetric' in settings: self.rot_symmetric.set(settings['rot_symmetric'])
+                if 'rot_min' in settings: set_entry(self.rot_min, settings['rot_min'])
+                if 'rot_max' in settings: set_entry(self.rot_max, settings['rot_max'])
+                if 'rot_offset' in settings: set_entry(self.rot_offset, settings['rot_offset'])
+                if 'rot_step' in settings: set_entry(self.rot_step, settings['rot_step'])
+                
+                if 'travelspeed' in settings: set_entry(self.travelspeed, settings['travelspeed'])
+                if 'pause_time' in settings: set_entry(self.pause_time, settings['pause_time'])
+        except Exception as e:
+            print("Error loading settings:", e)
 
     def _toggle_symmetric_widgets(self, is_symmetric, 
                                     min_lbl, min_entry_widget, max_lbl, max_entry_widget,
@@ -1422,6 +1509,7 @@ class PatternGeneratorGUI:
         """
         params = self.get_parameters()
         if params is None: return
+        self._save_last_parameters()
         
         total_points = self._calculate_total_points(params)
         if total_points == 0: 
