@@ -2385,6 +2385,9 @@ class GCodeSenderGUI:
         self.rotation_crash_test_complete = False
         self._update_all_displays()
         self._update_section_borders()
+        # Force the Tkinter rendering pipeline to flush immediately so
+        # the visual changes are applied without waiting for the next event loop cycle.
+        self.root.update_idletasks()
 
 
     # --- G-Code Sending & Control ---
@@ -4249,9 +4252,13 @@ class GCodeSenderGUI:
                 if hasattr(self, 'connect_button'):
                     self.connect_button.configure(style='PurpleRing.TButton')
             else:
-                self._conn_frame.configure(style=GREEN if bool(self.serial_connection) else YELLOW)
-                if hasattr(self, 'connect_button') and not bool(self.serial_connection):
-                    self.connect_button.configure(style='YellowRing.TButton')
+                connected = bool(self.serial_connection)
+                self._conn_frame.configure(style=GREEN if connected else YELLOW)
+                if hasattr(self, 'connect_button'):
+                    if connected:
+                        self.connect_button.configure(style='GreenRing.TButton', text='Disconnect')
+                    else:
+                        self.connect_button.configure(style='YellowRing.TButton', text='Connect')
 
         # MEASUREMENT — green when DMM connected AND (Log to CSV off OR file path set)
         if hasattr(self, '_meas_frame'):
