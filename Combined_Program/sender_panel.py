@@ -4869,8 +4869,13 @@ class GCodeSenderGUI:
                 import time
                 time.sleep(sec)
 
-            # Step 6: Return to the "center position" for X,Y,Z, and E.
-            update_status("moving to center position")
+            # Step 7: Final Completion Sequence
+            update_status("Test sequence finished. Holding 5s before returning to center...")
+            import time as _time
+            _time.sleep(5)
+
+            update_status("Returning to center position...")
+            # Move X, Y, Z, and E back to center/home
             cmd = self._apply_e_conversion(f"G1 Z{cz} X{cx} Y{cy} E0 F{speed_xy}\nM400")
             send_wait(cmd, timeout_s=30)
 
@@ -4885,7 +4890,7 @@ class GCodeSenderGUI:
             update_status("Collision Test Complete!")
             
             # Show completed popup
-            self.root.after(0, lambda: messagebox.showinfo("Test Completed", "Collision Avoidance Test Successfully Completed!\n\nReturning to 0°."))
+            self.root.after(0, lambda: messagebox.showinfo("Test Complete", "Test Complete - Verify current location is at center position."))
             
         except Exception as e:
             self.queue_message(f"Test Failed: {e}", "ERROR")

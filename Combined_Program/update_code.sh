@@ -18,5 +18,8 @@ else
     echo "----------------------------------------"
     echo "ERROR: Update failed. Please check your internet connection or git status."
     echo "----------------------------------------"
-    exit 1
 fi
+
+# Keep the window open so we can see the result
+read -p "Press Enter to exit..."
+exit 0
