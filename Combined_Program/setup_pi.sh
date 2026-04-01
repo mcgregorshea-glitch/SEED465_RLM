@@ -6,6 +6,14 @@ set -e # Exit immediately if a command exits with a non-zero status
 
 echo "Starting SEED Program Setup for Raspberry Pi..."
 
+echo "----------------------------------------"
+echo "Step 0: Updating code from GitHub..."
+echo "----------------------------------------"
+git fetch origin || echo "Warning: Could not fetch from origin. Check network."
+git reset --hard origin/master || echo "Warning: Could not reset to origin/master."
+echo "Update complete."
+echo "----------------------------------------"
+
 # 1. Ensure we are in the correct directory
 if [ ! -f "requirements.txt" ]; then
     echo "ERROR: requirements.txt not found in current directory!"
@@ -49,3 +57,7 @@ echo "==========================================================="
 echo "Setup Complete!"
 echo "To run the app: source .venv/bin/activate && python main.py"
 echo "==========================================================="
+
+# Keep the window open so we can see the result if launched from desktop
+read -p "Press Enter to exit..."
+exit 0
