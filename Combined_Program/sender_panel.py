@@ -2521,13 +2521,22 @@ class GCodeSenderGUI:
 
         if self.serial_connection:
             try:
-                self.log_message("Sending M112...")
+                self.log_message("Sending M410 (Quickstop) + M112 (Emergency Stop)...")
+                # Priority order: clear any queued G-code first so our stop commands
+                # are not delayed behind pending moves in the output buffer.
+                self.serial_connection.reset_output_buffer()
+                # M410: Immediately halt motion without requiring a printer reset.
+                # Supported in Marlin 2.x+; silently ignored if not supported.
+                self.serial_connection.write(b'M410\n')
+                # M112: Full emergency stop — halts all heaters/motion, requires reset.
                 self.serial_connection.write(b'M112\n')
-                time.sleep(0.5) # Give the command a moment to send
+                # Force transmit so the bytes aren't sitting in a system buffer.
+                self.serial_connection.flush()
+                time.sleep(0.2)
                 self.serial_connection.reset_input_buffer()
-                self.log_message("M112 sent.")
+                self.log_message("M410 + M112 sent.")
             except Exception as e:
-                self.log_message(f"Error sending M112: {e}", "ERROR")
+                self.log_message(f"Error sending emergency stop: {e}", "ERROR")
             finally:
                 # M112 requires a printer reset, so we must disconnect.
                 self.disconnect_printer(silent=True)
