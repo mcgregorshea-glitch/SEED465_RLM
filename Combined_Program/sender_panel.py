@@ -2349,12 +2349,31 @@ class GCodeSenderGUI:
             try:
                 self.serial_connection.close()
             except Exception as e:
-                if not silent:
                     self.log_message(f"Disconnect error: {e}", "ERROR")
             
         self.serial_connection = None
-        self.log_message("[DIAG] serial_connection cleared. Resetting GUI now.", "WARN")
-        
+        self.log_message("[DIAG] serial_connection cleared. Draining queue and resetting GUI.", "WARN")
+
+        # Drain any queued CONNECTED messages that the background thread may have
+        # posted just before we closed the port. Without this, check_message_queue()
+        # could process a stale CONNECTED message 100ms later and re-assert the green state.
+        try:
+            import queue as _queue
+            preserved = []
+            while True:
+                try:
+                    item = self.message_queue.get_nowait()
+                    if item[0] != 'CONNECTED':
+                        preserved.append(item)
+                    else:
+                        self.log_message("[DIAG] Drained a stale CONNECTED message.", "WARN")
+                except _queue.Empty:
+                    break
+            for item in preserved:
+                self.message_queue.put(item)
+        except Exception:
+            pass
+
         # --- Reset GUI to "Disconnected" state ---
         self.connection_status_var.set("Disconnected")
         self.status_indicator.set_status("off")
@@ -2366,6 +2385,54 @@ class GCodeSenderGUI:
         self.connect_button.state(['!disabled'])
         if hasattr(self, '_conn_frame'):
             self._conn_frame.configure(style='Yellow.TLabelframe')
+        self.port_combobox.configure(state="readonly")
+        self.baud_entry.configure(state=tk.NORMAL)
+        
+        self.start_button.config(state=tk.DISABLED)
+        self.pause_resume_button.config(text="Pause", state=tk.DISABLED)
+        self._set_manual_controls_state(tk.DISABLED)
+        self._set_goto_controls_state(tk.DISABLED)
+        self._set_terminal_controls_state(tk.DISABLED)
+
+        if hasattr(self, 'cancel_connect_button'):
+            self.cancel_connect_button.grid_remove()
+            self.cancel_connect_button.config(state=tk.DISABLED)
+        
+        self.progress_var.set(0.0)
+        self.progress_label_var.set("Progress: Idle")
+
+        # Reset the known position, setup flags, and update the display.
+
+        # Drain any queued CONNECTED messages that the background thread may have
+        # posted just before we closed the port. Without this, check_message_queue()
+        # could process a stale CONNECTED message 100ms later and re-assert the green state.
+        try:
+            import queue as _queue
+            preserved = []
+            while True:
+                try:
+                    item = self.message_queue.get_nowait()
+                    if item[0] != 'CONNECTED':
+                        preserved.append(item)
+                    else:
+                        self.log_message("[DIAG] Drained a stale CONNECTED message.", "WARN")
+                except _queue.Empty:
+                    break
+            for item in preserved:
+                self.message_queue.put(item)
+        except Exception:
+            pass
+
+        # --- Reset GUI to "Disconnected" state ---
+        self.connection_status_var.set("Disconnected")
+        self.status_indicator.set_status("off")
+        self.header_status_indicator.set_status("off")
+        self.footer_status_var.set("COM: -- @ --")
+
+        # Use .configure() for ttk widgets — .config() is unreliable for style/text on ttk
+        self.connect_button.configure(text="Connect", style='YellowRing.TButton')
+        self.connect_button.state(['!disabled'])
+        if hasattr(self, '_conn_frame'):
             self._conn_frame.configure(style='Yellow.TLabelframe')
         self.port_combobox.configure(state="readonly")
         self.baud_entry.configure(state=tk.NORMAL)
@@ -2389,8 +2456,24 @@ class GCodeSenderGUI:
         self.rotation_crash_test_complete = False
         self._update_all_displays()
         self._update_section_borders()
-        # Force the Tkinter rendering pipeline to flush immediately so
-        # the visual changes are applied without waiting for the next event loop cycle.
+
+        # Schedule a delayed re-enforcement of the disconnected state as a final
+        # failsafe against any stale message that slips through the drain above.
+        self.root.after(350, self._enforce_disconnect_state)
+
+    def _enforce_disconnect_state(self):
+        """
+        Failsafe called 350ms after disconnect_printer() to ensure the GUI
+        is showing the correct disconnected state. Guards against any stale
+        CONNECTED message that may have slipped through the queue drain.
+        """
+        if self.serial_connection is not None:
+            return  # We've reconnected since — don't override the connected state.
+        self.log_message("[DIAG] _enforce_disconnect_state firing.", "WARN")
+        self._update_section_borders()
+        if hasattr(self, '_conn_frame'):
+            self._conn_frame.configure(style='Yellow.TLabelframe')
+        self.connect_button.configure(text="Connect", style='YellowRing.TButton')
         self.root.update_idletasks()
 
 
