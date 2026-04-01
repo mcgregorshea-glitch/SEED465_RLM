@@ -2952,28 +2952,42 @@ class GCodeSenderGUI:
         if isinstance(event.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox, ttk.Spinbox)):
             return
 
-        # Check if connected and controls are actually enabled
+        # Handle priority interrupts (Stop / Pause) first, as these should work
+        # even if a command is currently running.
+        keysym = event.keysym.lower()
+        
+        if keysym == 'space':
+            self.emergency_stop()
+            return
+        elif keysym == 'p':
+            self._toggle_pause()
+            return
+
+        # Check if connected and controls are actually enabled for motion commands
         if not self.serial_connection or self.is_manual_command_running or self.is_sending:
             return
 
-        # Handle arrow keys first via keysym
-        keysym = event.keysym
-        if keysym == 'Left':
+        # Handle arrow keys via keysym
+        if keysym == 'left':
             self._jog('E', 1)
             return
-        elif keysym == 'Right':
+        elif keysym == 'right':
             self._jog('E', -1)
             return
-        elif keysym in ('Up', 'Down'):
-            self._cycle_step_size('ROT', 1 if keysym == 'Up' else -1)
+        elif keysym in ('up', 'down'):
+            self._cycle_step_size('ROT', 1 if keysym == 'up' else -1)
             return
         
-        # Handle characters
+        # Handle motion and setup shortcuts
         char = event.char.lower()
         if not char:
             return
 
-        if char == 'w':
+        if char == 'h':
+            self._home_printer()
+        elif char == 'c':
+            self._go_to_center()
+        elif char == 'w':
             self._jog('Y', -1)
         elif char == 's':
             self._jog('Y', 1)
