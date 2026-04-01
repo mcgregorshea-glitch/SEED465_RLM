@@ -4,6 +4,13 @@
 
 set -e # Exit immediately if a command exits with a non-zero status
 
+# If not running in a terminal, open one and relaunch this script
+if [ ! -t 1 ]; then
+    # We are likely running from a desktop double-click without terminal
+    exec lxterminal -e bash "$0" "$@"
+    exit 0
+fi
+
 echo "Starting SEED Program Setup for Raspberry Pi..."
 
 echo "----------------------------------------"
@@ -59,5 +66,6 @@ echo "To run the app: source .venv/bin/activate && python main.py"
 echo "==========================================================="
 
 # Keep the window open so we can see the result if launched from desktop
-read -p "Press Enter to exit..."
+read -p "Press Enter to Launch Program..."
+python main.py
 exit 0
