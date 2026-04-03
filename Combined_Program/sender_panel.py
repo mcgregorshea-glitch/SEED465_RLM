@@ -4867,6 +4867,10 @@ class GCodeSenderGUI:
         self.btn_exit_test.config(state=tk.DISABLED)
         self.lbl_test_status.config(text="Moving to Center...", fg=self.COLOR_ACCENT_CYAN)
         
+        # Clear any dangling stop/pause flags from previous runs
+        self.stop_event.clear()
+        self.pause_event.set()
+        
         threading.Thread(target=self._collision_test_worker, daemon=True).start()
 
     def _collision_test_worker(self):
