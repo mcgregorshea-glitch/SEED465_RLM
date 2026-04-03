@@ -3080,7 +3080,7 @@ class GCodeSenderGUI:
             self.quick_stop()
             return
         elif keysym == 'p':
-            self._toggle_pause()
+            self.toggle_pause_resume()
             return
 
         # Check if connected and controls are actually enabled for motion commands
