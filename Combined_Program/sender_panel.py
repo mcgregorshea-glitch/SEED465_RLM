@@ -3101,7 +3101,7 @@ class GCodeSenderGUI:
             return
 
         if char == 'h':
-            self._home_printer()
+            self._home_all()
         elif char == 'c':
             self._go_to_center()
         elif char == 'w':
@@ -4830,49 +4830,22 @@ class GCodeSenderGUI:
 
     def _stop_collision_test(self):
         """
-        Emergency stop specific to the collision avoidance test.
-        Sends M112 immediately to kill all motion, fully disconnects,
-        and paints UI purple to indicate hardware fault requirement.
+        Quick stop specific to the collision avoidance test.
+        Sends M410 immediately to kill all motion, and aborts the test.
         """
-        self.log_message("!!! COLLISION TEST ABORTED — Emergency Stop !!!", "CRITICAL")
-        self.hardware_fault = True
-
-        # Signal the worker thread to abort immediately
+        self.log_message("!!! COLLISION TEST ABORTED — Quick Stop !!!", "WARN")
         self.is_collision_test_running = False
-        self.stop_event.set()
-        self.pause_event.set()  # Unblock any paused state
-
-        # Invalidate the test result
         self.rotation_crash_test_complete = False
-
+        
         if hasattr(self, 'lbl_test_status') and self.lbl_test_status.winfo_exists():
             self.lbl_test_status.config(
-                text="Test Failed - please cycle power on the test machine, unplug the USB from the Raspberry Pi, and reconnect.", 
-                fg=self.COLOR_ACCENT_RED,
+                text="Test Aborted - Re-center the axis and try again.", 
+                fg=self.COLOR_ACCENT_AMBER,
                 font=("Rajdhani", 12, "bold"),
                 wraplength=400
             )
 
-        # Send M112 hard-stop directly
-        if self.serial_connection:
-            try:
-                self.serial_connection.write(b'M112\n')
-                import time as _t
-                _t.sleep(0.3)
-                self.serial_connection.reset_input_buffer()
-                self.serial_connection.reset_output_buffer()
-                self.log_message("M112 sent. Printer stopped.", "WARN")
-            except Exception as e:
-                self.log_message(f"Error sending M112: {e}", "ERROR")
-        else:
-            self.log_message("Not connected — no M112 sent.", "WARN")
-
-        # Automatically disconnect the printer
-        self.disconnect_printer(silent=True)
-
-        # Update status indicators
-        self.status_indicator.set_status("error")
-        self.header_status_indicator.set_status("error")
+        self.quick_stop()
 
         # Reset the worker flags and update display colors
         self.is_manual_command_running = False
