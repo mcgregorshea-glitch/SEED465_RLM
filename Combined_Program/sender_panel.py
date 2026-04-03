@@ -529,6 +529,11 @@ class GCodeSenderGUI:
         self.pause_event.set() # Initialize in the "go" state (not paused)
         self.cancel_connect_event = threading.Event()
         
+        # Lock to serialize all serial port writes across threads.
+        # emergency_stop() acquires this to guarantee M112 is never interleaved
+        # with a G-code command that a background thread is mid-write.
+        self.serial_lock = threading.Lock()
+        
         # A queue for passing messages from background threads to the main GUI thread
         self.message_queue = queue.Queue()
         
@@ -2595,6 +2600,12 @@ class GCodeSenderGUI:
         This sets the stop event to halt any running threads, sends M112 to the
         printer (which usually requires a physical reset), and disconnects the
         application from the serial port.
+
+        Thread-safety: stop_event is set FIRST so background threads stop queuing
+        new writes. We then acquire serial_lock to guarantee any in-progress write
+        finishes before we flush the output buffer and write M410/M112. This means
+        the E-stop bytes reach the printer immediately, regardless of what was
+        previously queued.
         """
         # If trying to stop while a connection is being attempted, cancel the connection.
         if self.connect_button['state'] == tk.DISABLED and not self.serial_connection and hasattr(self, 'cancel_connect_button') and self.cancel_connect_button.winfo_ismapped():
@@ -2612,8 +2623,9 @@ class GCodeSenderGUI:
         # Invalidate collision test status if we had to stop motion
         self.rotation_crash_test_complete = False
         
-        # Un-pause and then stop all running threads.
-        self.pause_event.set()
+        # Step 1: Signal all background threads to stop immediately.
+        # They check stop_event between writes, so they will not queue any further commands.
+        self.pause_event.set()   # Unblock any paused thread so it can see stop_event.
         self.stop_event.set()
         
         # Update status indicators to "error" (red).
@@ -2622,17 +2634,21 @@ class GCodeSenderGUI:
 
         if self.serial_connection:
             try:
-                self.log_message("Sending M410 (Quickstop) + M112 (Emergency Stop)...")
-                # Priority order: clear any queued G-code first so our stop commands
-                # are not delayed behind pending moves in the output buffer.
-                self.serial_connection.reset_output_buffer()
-                # M410: Immediately halt motion without requiring a printer reset.
-                # Supported in Marlin 2.x+; silently ignored if not supported.
-                self.serial_connection.write(b'M410\n')
-                # M112: Full emergency stop — halts all heaters/motion, requires reset.
-                self.serial_connection.write(b'M112\n')
-                # Force transmit so the bytes aren't sitting in a system buffer.
-                self.serial_connection.flush()
+                self.log_message("Sending M410 + M112 (Emergency Stop)...")
+                # Step 2: Acquire the serial lock.
+                # Any background thread that is mid-write will finish its current
+                # write() call before we proceed. Once we hold the lock, no other
+                # thread can write to the port until we release it.
+                with self.serial_lock:
+                    # Clear the OS-level output buffer so any buffered G-code bytes
+                    # that haven't left the PC yet are discarded.
+                    self.serial_connection.reset_output_buffer()
+                    # M410: Quickstop — halts motion immediately without requiring reset.
+                    self.serial_connection.write(b'M410\n')
+                    # M112: Full emergency stop — kills all motion/heaters, requires reset.
+                    self.serial_connection.write(b'M112\n')
+                    # Force the bytes out of the PC's serial driver immediately.
+                    self.serial_connection.flush()
                 time.sleep(0.2)
                 self.serial_connection.reset_input_buffer()
                 self.log_message("M410 + M112 sent.")
@@ -2680,7 +2696,13 @@ class GCodeSenderGUI:
         if self.serial_connection:
             try:
                 self.log_message("Sending M410 (Quick Stop)...")
-                self.serial_connection.write(b'M410\n')
+                # Acquire the serial lock so M410 is not interleaved with a
+                # background write. Unlike emergency_stop, we do NOT call
+                # reset_output_buffer() here -- quick stop intentionally lets
+                # the printer drain its existing move buffer before halting.
+                with self.serial_lock:
+                    self.serial_connection.write(b'M410\n')
+                    self.serial_connection.flush()
                 time.sleep(0.1)
                 self.serial_connection.reset_input_buffer()
                 self.log_message("M410 sent.")
@@ -2783,7 +2805,8 @@ class GCodeSenderGUI:
         self.queue_message("Starting Homing Verification...", "INFO")
         
         def send_and_wait_m119():
-            self.serial_connection.write(b'M119\n')
+            with self.serial_lock:
+                self.serial_connection.write(b'M119\n')
             buffer = ""
             start = time.time()
             while time.time() - start < 5.0:
@@ -2796,7 +2819,8 @@ class GCodeSenderGUI:
             raise TimeoutError("M119 timeout")
 
         def send_move_and_wait(cmd):
-            self.serial_connection.write(cmd.encode('utf-8') + b'\n')
+            with self.serial_lock:
+                self.serial_connection.write(cmd.encode('utf-8') + b'\n')
             buffer = ""
             start = time.time()
             # Homing can take longer, but G1 moves should be within 30s
@@ -2921,7 +2945,8 @@ class GCodeSenderGUI:
                 
                 # --- Send the line and wait for 'ok' ---
                 line_to_send = self._apply_e_conversion(line)
-                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
+                with self.serial_lock:
+                    self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
                 
                 # Log modification if it happened
                 if line != line_to_send:
@@ -3930,7 +3955,8 @@ class GCodeSenderGUI:
             # --- Send Line and Wait for 'ok' ---
             try:
                 line_to_send = self._apply_e_conversion(gcode_line)
-                self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
+                with self.serial_lock:
+                    self.serial_connection.write(line_to_send.encode('utf-8') + b'\n')
                 ok_received = False
                 response_buffer = ""
                 timeout = self.serial_connection.timeout if self.serial_connection.timeout else 10.0
@@ -3978,7 +4004,8 @@ class GCodeSenderGUI:
                             # 1. Send M400 to wait for move completion
                             m400_ok = False
                             try:
-                                self.serial_connection.write(b'M400\n')
+                                with self.serial_lock:
+                                    self.serial_connection.write(b'M400\n')
                                 # M400 blocks until moves are done.
                                 m400_start = time.time()
                                 m400_buffer = ""
@@ -4945,7 +4972,8 @@ class GCodeSenderGUI:
             def send_wait(cmd_str, timeout_s=30):
                 lines = [c.strip() for c in cmd_str.split('\n') if c.strip()]
                 for c in lines:
-                    self.serial_connection.write((c + '\n').encode('utf-8'))
+                    with self.serial_lock:
+                        self.serial_connection.write((c + '\n').encode('utf-8'))
                 for _ in lines:
                     if not self._wait_for_ok(timeout=timeout_s):
                         raise Exception(f"Timeout waiting for OK")
