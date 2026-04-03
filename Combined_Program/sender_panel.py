@@ -2635,20 +2635,27 @@ class GCodeSenderGUI:
         if self.serial_connection:
             try:
                 self.log_message("Sending M410 + M112 (Emergency Stop)...")
-                # Step 2: Acquire the serial lock.
-                # Any background thread that is mid-write will finish its current
-                # write() call before we proceed. Once we hold the lock, no other
-                # thread can write to the port until we release it.
-                with self.serial_lock:
-                    # Clear the OS-level output buffer so any buffered G-code bytes
-                    # that haven't left the PC yet are discarded.
-                    self.serial_connection.reset_output_buffer()
-                    # M410: Quickstop — halts motion immediately without requiring reset.
-                    self.serial_connection.write(b'M410\n')
-                    # M112: Full emergency stop — kills all motion/heaters, requires reset.
-                    self.serial_connection.write(b'M112\n')
-                    # Force the bytes out of the PC's serial driver immediately.
-                    self.serial_connection.flush()
+                # Do NOT acquire serial_lock here. On Windows, serial.write() can
+                # block for up to write_timeout (10s) holding the lock while the
+                # OS serial driver drains. Waiting for the lock would delay M112
+                # by multiple seconds -- defeating the purpose of an emergency stop.
+                #
+                # Instead: stop_event is already set above, so the background thread
+                # will not start any NEW writes. We sleep 50ms to let any
+                # currently-executing write() syscall finish, then write directly.
+                time.sleep(0.05)
+                # Clear any G-code bytes sitting in the OS transmit buffer.
+                self.serial_connection.reset_output_buffer()
+                # Send a bare newline first to flush any partial command that the
+                # printer may have received (from bytes cut off by the buffer clear).
+                # This keeps Marlin's serial parser in a known-good state.
+                self.serial_connection.write(b'\n')
+                # M410: Quickstop -- halts motion immediately without requiring reset.
+                self.serial_connection.write(b'M410\n')
+                # M112: Full emergency stop -- kills all motion/heaters, requires reset.
+                self.serial_connection.write(b'M112\n')
+                # Force the bytes out of the PC's serial driver immediately.
+                self.serial_connection.flush()
                 time.sleep(0.2)
                 self.serial_connection.reset_input_buffer()
                 self.log_message("M410 + M112 sent.")
@@ -2696,13 +2703,14 @@ class GCodeSenderGUI:
         if self.serial_connection:
             try:
                 self.log_message("Sending M410 (Quick Stop)...")
-                # Acquire the serial lock so M410 is not interleaved with a
-                # background write. Unlike emergency_stop, we do NOT call
-                # reset_output_buffer() here -- quick stop intentionally lets
-                # the printer drain its existing move buffer before halting.
-                with self.serial_lock:
-                    self.serial_connection.write(b'M410\n')
-                    self.serial_connection.flush()
+                # Do NOT acquire serial_lock here (same reason as emergency_stop --
+                # the lock could block on a slow OS write). stop_event is already
+                # set, so no new background writes will be started. A 50ms sleep
+                # lets any in-flight write() syscall complete before we proceed.
+                time.sleep(0.05)
+                self.serial_connection.write(b'\n')
+                self.serial_connection.write(b'M410\n')
+                self.serial_connection.flush()
                 time.sleep(0.1)
                 self.serial_connection.reset_input_buffer()
                 self.log_message("M410 sent.")
