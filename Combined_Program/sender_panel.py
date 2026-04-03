@@ -2635,8 +2635,9 @@ class GCodeSenderGUI:
         if self.serial_connection:
             try:
                 self.log_message("Sending M112 (Emergency Stop)...")
-                # Do absolutely nothing else except immediately send M112.
-                # Do not wait for locks, do not clear OS buffers (which can block).
+                # Brute force: Nuke the OS transmit buffer to clear out any pending background
+                # G-code moves that have stacked up, then slam M112 down the pipe.
+                self.serial_connection.reset_output_buffer()
                 self.serial_connection.write(b'M112\n')
                 self.serial_connection.flush()
                 self.log_message("M112 sent.")
@@ -2684,13 +2685,14 @@ class GCodeSenderGUI:
         if self.serial_connection:
             try:
                 self.log_message("Sending M410 (Quick Stop)...")
-                # Acquire the serial lock so M410 is not interleaved with a
-                # background write. Unlike emergency_stop, we do NOT call
-                # reset_output_buffer() here -- quick stop intentionally lets
-                # the printer drain its existing move buffer before halting.
-                with self.serial_lock:
-                    self.serial_connection.write(b'M410\n')
-                    self.serial_connection.flush()
+                # Do NOT acquire serial_lock here (same reason as emergency_stop --
+                # the lock could block on a slow OS write). stop_event is already
+                # set, so no new background writes will be started. A 50ms sleep
+                # lets any in-flight write() syscall complete before we proceed.
+                time.sleep(0.05)
+                self.serial_connection.write(b'\n')
+                self.serial_connection.write(b'M410\n')
+                self.serial_connection.flush()
                 time.sleep(0.1)
                 self.serial_connection.reset_input_buffer()
                 self.log_message("M410 sent.")
