@@ -2624,30 +2624,33 @@ class GCodeSenderGUI:
         self.rotation_crash_test_complete = False
         
         # Step 1: Signal all background threads to stop immediately.
-        # They check stop_event between writes, so they will not queue any further commands.
-        self.pause_event.set()   # Unblock any paused thread so it can see stop_event.
+        self.pause_event.set()   
         self.stop_event.set()
         
-        # Update status indicators to "error" (red).
-        self.status_indicator.set_status("error")
-        self.header_status_indicator.set_status("error")
+        # Step 2: IMMEDIATE HARDWARE STOP. Bypass UI updates, do this first.
+        try:
+            self.log_message("Sending M112 (Emergency Stop)...")
+            self.serial_connection.reset_output_buffer()
+            self.serial_connection.write(b'\nM112\n')
+            self.serial_connection.flush()
+            self.log_message("M112 sent.")
+        except Exception as e:
+            self.log_message(f"Error sending emergency stop: {e}", "ERROR")
 
-        if self.serial_connection:
-            try:
-                self.log_message("Sending M112 (Emergency Stop)...")
-                # Brute force: Nuke the OS transmit buffer to clear out any pending background
-                # G-code moves that have stacked up, then slam M112 down the pipe.
-                self.serial_connection.reset_output_buffer()
-                self.serial_connection.write(b'M112\n')
-                self.serial_connection.flush()
-                self.log_message("M112 sent.")
-            except Exception as e:
-                self.log_message(f"Error sending emergency stop: {e}", "ERROR")
-            finally:
-                # M112 requires a printer reset, so we must disconnect.
-                self.disconnect_printer(silent=True)
-                messagebox.showwarning("Emergency Stop", "M112 sent.\nPrinter requires reset.\nConnection closed.")
-                
+        # Step 3: Update UI
+        try:
+            self.status_indicator.set_status("error")
+            self.header_status_indicator.set_status("error")
+        except Exception as e:
+            print(f"Error updating UI indicators: {e}")
+
+        # Step 4: Disconnect and reset
+        try:
+            self.disconnect_printer(silent=True)
+            messagebox.showwarning("Emergency Stop", "M112 sent.\nPrinter requires reset.\nConnection closed.")
+        except Exception as e:
+            print(f"Error during disconnect/messagebox: {e}")
+            
         self._reset_gui_after_stop(reset_position=True)
 
     def quick_stop(self):
