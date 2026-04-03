@@ -3076,6 +3076,9 @@ class GCodeSenderGUI:
         if keysym == 'space':
             self.emergency_stop()
             return
+        elif keysym == 'k':
+            self.quick_stop()
+            return
         elif keysym == 'p':
             self._toggle_pause()
             return
