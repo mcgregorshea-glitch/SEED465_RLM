@@ -4942,9 +4942,26 @@ class GCodeSenderGUI:
                 for c in lines:
                     with self.serial_lock:
                         self.serial_connection.write((c + '\n').encode('utf-8'))
-                for _ in lines:
-                    if not self._wait_for_ok(timeout=timeout_s):
-                        raise Exception(f"Timeout waiting for OK")
+                    
+                    # Wait for OK specifically for this line
+                    start = time.time()
+                    buffer = ""
+                    ok_received = False
+                    while time.time() - start < timeout_s:
+                        if self.stop_event.is_set(): raise InterruptedError("Stop")
+                        if self.serial_connection.in_waiting > 0:
+                            buffer += self.serial_connection.read(self.serial_connection.in_waiting).decode('utf-8', errors='ignore')
+                            while '\n' in buffer:
+                                full_line, buffer = buffer.split('\n', 1)
+                                if 'ok' in full_line.lower():
+                                    ok_received = True
+                                    break
+                        if ok_received:
+                            break
+                        time.sleep(0.05)
+                        
+                    if not ok_received:
+                        raise Exception(f"Timeout waiting for OK for command: {c}")
 
             # Step 1: Move Z axis to scan's minimum Z value first
             update_status(f"Moving to Min Z ({min_z})...")
