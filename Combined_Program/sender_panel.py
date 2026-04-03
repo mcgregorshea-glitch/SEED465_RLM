@@ -2681,28 +2681,27 @@ class GCodeSenderGUI:
         self.pause_event.set()
         self.stop_event.set()
         
-        # Update status indicators to "busy" (amber).
-        self.status_indicator.set_status("busy")
-        self.header_status_indicator.set_status("busy")
+        # Step 2: IMMEDIATE HARDWARE STOP. Bypass UI updates, do this first.
+        try:
+            self.log_message("Sending M410 (Quick Stop)...")
+            self.serial_connection.write(b'\nM410\n')
+            self.serial_connection.flush()
+            self.log_message("M410 sent.")
+        except Exception as e:
+            self.log_message(f"Error sending M410: {e}", "ERROR")
 
-        if self.serial_connection:
-            try:
-                self.log_message("Sending M410 (Quick Stop)...")
-                # Do NOT acquire serial_lock here (same reason as emergency_stop --
-                # the lock could block on a slow OS write). stop_event is already
-                # set, so no new background writes will be started. A 50ms sleep
-                # lets any in-flight write() syscall complete before we proceed.
-                time.sleep(0.05)
-                self.serial_connection.write(b'\n')
-                self.serial_connection.write(b'M410\n')
-                self.serial_connection.flush()
-                time.sleep(0.1)
-                self.serial_connection.reset_input_buffer()
-                self.log_message("M410 sent.")
-            except Exception as e:
-                self.log_message(f"Error sending M410: {e}", "ERROR")
-            
+        # Step 3: Update UI
+        try:
+            self.status_indicator.set_status("busy")
+            self.header_status_indicator.set_status("busy")
+        except Exception as e:
+            print(f"Error updating UI indicators: {e}")
+
+        # Step 4: Disconnect and reset
+        try:
             messagebox.showinfo("Quick Stop", "M410 sent. Printer will stop after clearing its buffer.\nManual controls are now enabled.")
+        except Exception as e:
+            print(f"Error during messagebox: {e}")
             
         self._reset_gui_after_stop(reset_position=False)
 
