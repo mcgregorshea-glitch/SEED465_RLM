@@ -1,0 +1,56 @@
+--- 4-AXIS SCANNING SYSTEM — OPERATING GUIDE ---
+
+1. SYSTEM OVERVIEW
+   The 4-Axis Scanning System is a unified interface for 4-axis movement with DMM integration. It is designed to automate coordinate-based testing.
+
+2. HARDWARE OVERVIEW
+   - 3D Printer: Ender 3 printer (requires custom 3D printed molds for each hub and implant pair).
+   - DMM: Siglent SDM3045X DMM.
+   - Controller: Raspberry Pi 4B (though compatible with any machine running Python).
+   - Test Beds: 3D test bed (for tests without tilt) vs. 4D tilting bed (for tests requiring tilt).
+
+3. SAFETY & HARDWARE SETUP SEQUENCE (MANDATORY)
+   A. Install the correct bed for your task (3D vs 4D tilt bed).
+   B. Install the hub basket and implant mold.
+   C. Attach all probes and wires securely.
+   D. Connect the Pi to the test machine using a USB cable.
+   E. Connect the Pi to the DMM via an ethernet cable.
+
+4. PATTERN GENERATOR USAGE
+   Use this panel to generate parameterized GCode for your scan. The coordinates adapt to the 'center' position marked on the SENDER panel.
+   A. Determine Scan Dimensions: How far off-center for X, Y, Z axes? If the scan is symmetric (e.g., 50 mm in each direction along the X axis), check the "Symmetric" checkbox.
+   B. Resolution: Choose the step size. Smaller step sizes result in finer granularity and more data points, but the scan takes longer.
+   C. Tilt Angles: Determine necessary tilt angles. If no tilt is used (only 0 degrees), use the 3D test bed. If tilt is required, use the tilting bed hardware.
+   D. Output: 
+      - Click "Save File" to save the GCode for future use (make sure to enter a valid profile name).
+      - Click "Load to Sender" to load the GCode immediately into the Sender panel without permanently saving it (it temporarily saves to the system's temporary folder).
+
+5. SOFTWARE SETUP SEQUENCE
+Follow this sequence for every new test:
+   A. CONNECT: Select the COM port for the printer and click 'Connect'. The frame will turn Green.
+   B. HOME: Click 'Home All'. The printer must know its position before any manual or automated moves. Use caution if issuing move commands before homing.
+   C. LOAD G-CODE: Load your pattern file. The 3D and Top-Down visualizers will render the path.
+   D. MARK CENTER: Jog the printer to your desired test center point and click 'Mark Center'. Depending on the size of your scan profile, this may take several seconds to process.
+   E. COLLISION TEST: Click 'Begin Test' in the Collision Avoidance panel. You CANNOT start a scan until this test passes.
+   F. CONNECT DMM: Ensure your DMM is on the 10.247.103.x subnet and click 'Scan DMMs'.
+
+6. KEYBOARD SHORTCUTS
+   - [W][A][S][D]: Jog X and Y axes.
+   - [Q][E]: Jog Z axis (Up/Down).
+   - [R][F]: Increase/Decrease XYZ Step Size.
+   - [LEFT ARROW][RIGHT ARROW]: Jog tilt axis (E).
+   - [UP ARROW][DOWN ARROW]: Increase/Decrease Tilt Step Size.
+   - [P]: Toggle Pause/Resume during an active scan.
+   - [K]: Quick Stop (Immediate Halt - preserves position tracking).
+   - [ESC]: Emergency Stop (Immediate Halt - clears command buffer, requires power cycling on the 4-axis machine, and USB physical disconnect/reconnect).
+
+7. COMPONENT BREAKDOWN
+   - GENERATOR: Create custom raster, serpentine, or spiral patterns.
+   - SENDER: Stream G-Code to the printer with real-time position tracking.
+   - 3D VIEW: Plot of the G-code path. Gray lines are travel; Blue/Cyan are extrusion/moves.
+   - TERMINAL: Direct SCPI/G-Code command entry for advanced users.
+
+8. TROUBLESHOOTING
+   - DMM Connection: Ensure the Pi and DMM are on the same subnet. Check IP in debug_dmm.py. The Siglent SDM3045X DMM must have its LAN interface enabled and properly configured.
+   - Serial Timeout: If the printer stops responding, check the physical USB connection and click Disconnect/Connect.
+   - Rendering the 2D Toolpath and 3D plot views can increase latency and degrade performance, especially on the Raspberry Pi; to maximize performance, disable these views using the toggle buttons next to each view.
