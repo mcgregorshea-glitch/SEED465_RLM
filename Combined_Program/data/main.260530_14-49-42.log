@@ -1,0 +1,9 @@
+[26-05-30 14:49:42] GUI started
+[26-05-30 14:49:45] Communication timed out
+[26-05-30 14:49:45] USB serial port not found
+[26-05-30 14:50:04] Selected port COM3
+[26-05-30 14:50:04] Using USB serial port COM3
+[26-05-30 14:50:04] State changed to WPT Ready
+[26-05-30 14:50:04] Implant State changed to Charge Active
+[26-05-30 14:50:04] Found implant version v01.23.7357
+[26-05-30 14:50:04] Found hub version v01.20.7357

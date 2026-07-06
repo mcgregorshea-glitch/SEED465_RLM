@@ -1,0 +1,4 @@
+pyserial>=3.0
+crc==7.1.0
+bitstruct>=8.20.0
+numpy>=1.0
